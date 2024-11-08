@@ -1,15 +1,26 @@
+import random
 import time
 
 import sentry_sdk
 from sentry_sdk import capture_exception, capture_message
-from sentry_sdk.tracing import Span, Transaction
+from sentry_sdk.tracing import Span
 
 sentry_sdk.init(
-    dsn="https://3a076cacc3dd1cdc233d62f06f484acd@o4507289866010624.ingest.us.sentry.io/4508264505606144",
+    # https://daily-habits-ben-coe-test-orga.sentry.io/profiling/?project=4508264924315648
+    dsn="https://99f7769e482e93064d3d51feac4e2093@o4506956365430784.ingest.us.sentry.io/4508264924315648",
+    # dsn=(
+    #     "https://3a076cacc3dd1cdc233d62f06f484acd@"
+    #     "o4507289866010624.ingest.us.sentry.io/4508264505606144"
+    # ),
+    # https://testorg-am3launch-am3-team.sentry.io/settings/projects/alberto-rust/keys/
+    # dsn="https://b52904e72a72c0ed8d3996cafe40d4af@o4507289623330816.ingest.us.sentry.io/4507352301240320",
     # Set traces_sample_rate to 1.0 to capture 100%
     # of transactions for tracing.
     traces_sample_rate=1.0,
     debug=True,
+    _experiments={
+        "continuous_profiling_auto_start": True,
+    },
 )
 
 
@@ -40,31 +51,40 @@ def cpu_intensive_task():
     return result
 
 
+# Start the profiler
+sentry_sdk.profiler.start_profiler()
+
+
 def main():
-    with sentry_sdk.start_transaction(name="test-transaction"):
-        # Start the profiler
-        sentry_sdk.profiler.start_profiler()
+    try:
+        while True:  # Infinite loop
+            # Start the profiler
+            sentry_sdk.profiler.start_profiler()
+            with sentry_sdk.start_transaction(name="test-transaction"):
 
-        print("Starting test events...")
+                print("Starting test events...")
 
-        # Send test error
-        simulate_error()
+                with Span(op="child-operation", description="test-child-span"):
+                    # Send test error
+                    simulate_error()
 
-        # Create and send test transaction
-        create_test_transaction()
+                # Create and send test transaction
+                create_test_transaction()
 
-        # Run CPU intensive task multiple times or for longer duration
-        for _ in range(50):  # Run multiple iterations
-            cpu_intensive_task()
-            time.sleep(0.05)  # Add small delays between iterations
+                # Run CPU intensive task multiple times or for longer duration
+                for _ in range(50):  # Run multiple iterations
+                    cpu_intensive_task()
+                    time.sleep(
+                        0.05 + random.uniform(0, 0.05)
+                    )  # Add small delays with jitter between iterations
 
-        # Stop the profiler
-        sentry_sdk.profiler.stop_profiler()
+                print("Test events sent!")
 
-        print("Test events sent!")
+            # Stop the profiler
+            sentry_sdk.profiler.stop_profiler()
 
-        # Add delay before exit to ensure events are sent
-        # time.sleep(3)
+    except KeyboardInterrupt:
+        print("\nShutting down gracefully...")
 
 
 if __name__ == "__main__":
