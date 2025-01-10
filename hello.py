@@ -23,14 +23,18 @@ DSN_ALBERTO_RUST = (
 
 # Dictionary of available DSNs - add new ones here
 AVAILABLE_DSNS = {
+    # Old orgs
     "daily_habits": DSN_DAILY_HABITS,
     "alternative": DSN_ALTERNATIVE,
     "alberto_rust": DSN_ALBERTO_RUST,
     "testorg-am3launch-am2-team": "https://aa95ea1dd9e58651693d3e8055d2cd69@o4507289522733056.ingest.us.sentry.io/4508298575020032",
+    # Current orgs
+    "profile-hours-am2-team": "https://c9275450b3c73d2e984beee5aab20689@o4508486227722240.ingest.us.sentry.io/4508616529346560",
+    "profile-hours-am3-team": "https://c523b2b6fbf35cd224884b8f3538cf13@o4508486283952128.ingest.us.sentry.io/4508486284738560",
 }
 
 sentry_sdk.init(
-    dsn=AVAILABLE_DSNS["testorg-am3launch-am2-team"],
+    dsn=AVAILABLE_DSNS["profile-hours-am3-team"],
     # Set traces_sample_rate to 1.0 to capture 100%
     # of transactions for tracing.
     traces_sample_rate=1.0,
