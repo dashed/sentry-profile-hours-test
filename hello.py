@@ -33,12 +33,21 @@ AVAILABLE_DSNS = {
     "profile-hours-am3-team": "https://c523b2b6fbf35cd224884b8f3538cf13@o4508486283952128.ingest.us.sentry.io/4508486284738560",
 }
 
+
+# Define a before_send hook to modify the platform
+def before_send(event, hint):
+    # Change the platform to whatever you need for testing
+    event["platform"] = "android"
+    return event
+
+
 sentry_sdk.init(
     dsn=AVAILABLE_DSNS["profile-hours-am2-team"],
     # Set traces_sample_rate to 1.0 to capture 100%
     # of transactions for tracing.
     traces_sample_rate=1.0,
     debug=True,
+    before_send=before_send,  # Add before_send hook to modify the platform
     _experiments={
         "continuous_profiling_auto_start": True,
     },
@@ -81,6 +90,7 @@ def main():
         while True:  # Infinite loop
             # Start the profiler
             sentry_sdk.profiler.start_profiler()
+
             with sentry_sdk.start_transaction(name="test-transaction"):
 
                 print("Starting test events...")
