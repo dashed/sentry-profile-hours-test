@@ -34,7 +34,7 @@ AVAILABLE_DSNS = {
 }
 
 sentry_sdk.init(
-    dsn=AVAILABLE_DSNS["profile-hours-am3-team"],
+    dsn=AVAILABLE_DSNS["profile-hours-am2-team"],
     # Set traces_sample_rate to 1.0 to capture 100%
     # of transactions for tracing.
     traces_sample_rate=1.0,
