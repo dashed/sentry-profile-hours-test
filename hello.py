@@ -37,6 +37,8 @@ AVAILABLE_DSNS = {
 # Define a before_send hook to modify the platform
 def before_send(event, hint):
     # Change the platform to whatever you need for testing
+    # See UI_PROFILE_PLATFORMS
+    # https://github.com/getsentry/sentry/blob/c3420bc3a670ba88cb37b9a40ceede748cafdf50/src/sentry/profiles/task.py#L47
     event["platform"] = "android"
     return event
 
