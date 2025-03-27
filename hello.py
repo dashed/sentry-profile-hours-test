@@ -5,32 +5,9 @@ import sentry_sdk
 from sentry_sdk import capture_exception, capture_message
 from sentry_sdk.tracing import Span
 
-# Define available DSNs
-DSN_DAILY_HABITS = (
-    "https://99f7769e482e93064d3d51feac4e2093@"
-    "o4506956365430784.ingest.us.sentry.io/4508264924315648"
-)  # daily-habits-ben-coe-test-orga
-
-DSN_ALTERNATIVE = (
-    "https://3a076cacc3dd1cdc233d62f06f484acd@"
-    "o4507289866010624.ingest.us.sentry.io/4508264505606144"
-)
-
-DSN_ALBERTO_RUST = (
-    "https://b52904e72a72c0ed8d3996cafe40d4af@"
-    "o4507289623330816.ingest.us.sentry.io/4507352301240320"
-)  # testorg-am3launch-am3-team
-
 # Dictionary of available DSNs - add new ones here
 AVAILABLE_DSNS = {
-    # Old orgs
-    "daily_habits": DSN_DAILY_HABITS,
-    "alternative": DSN_ALTERNATIVE,
-    "alberto_rust": DSN_ALBERTO_RUST,
-    "testorg-am3launch-am2-team": "https://aa95ea1dd9e58651693d3e8055d2cd69@o4507289522733056.ingest.us.sentry.io/4508298575020032",
-    # Current orgs
-    "profile-hours-am2-team": "https://c9275450b3c73d2e984beee5aab20689@o4508486227722240.ingest.us.sentry.io/4508616529346560",
-    "profile-hours-am3-team": "https://c523b2b6fbf35cd224884b8f3538cf13@o4508486283952128.ingest.us.sentry.io/4508486284738560",
+    "profile-hours-am2-business": "https://b700116ce3eadd661071ad84ed45028b@o4508486249218048.ingest.us.sentry.io/4508486249938944"
 }
 
 
@@ -44,7 +21,7 @@ def before_send(event, hint):
 
 
 sentry_sdk.init(
-    dsn=AVAILABLE_DSNS["profile-hours-am2-team"],
+    dsn=AVAILABLE_DSNS["profile-hours-am2-business"],
     # Set traces_sample_rate to 1.0 to capture 100%
     # of transactions for tracing.
     traces_sample_rate=1.0,
