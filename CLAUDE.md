@@ -24,9 +24,29 @@
 ## Project Structure
 - `external/` directory contains cloned GitHub repositories for reference:
   - `sentry/`: Main Sentry backend/frontend codebase
+    - `src/sentry/profiles/`: Core profile processing and storage
+    - `src/sentry/profiles/task.py`: Contains `UI_PROFILE_PLATFORMS` defining platform categorization
+    - `static/app/views/profiling/`: Frontend code for profile visualization
+  
   - `sentry-python/`: Python SDK for Sentry
-  - `relay/`: Proxy service that validates and processes events
+    - `sentry_sdk/profiler/transaction_profiler.py`: Transaction-based profiling implementation
+    - `sentry_sdk/profiler/continuous_profiler.py`: Continuous profiling implementation
+    - `sentry_sdk/profiler/utils.py`: Shared utilities for both profiling modes
+    - `sentry_sdk/consts.py`: Contains SDK configuration options
+
+  - `relay/`: Rust-based proxy service that validates and processes events
+    - `relay-profiling/src/lib.rs`: Core profile processing functionality
+    - `relay-profiling/src/outcomes.rs`: Defines profile discard reasons
+    - `relay-server/src/services/processor/profile.rs`: Handles transaction profiles
+    - `relay-server/src/services/processor/profile_chunk.rs`: Processes continuous profile chunks
+
   - `sentry-docs/`: Documentation for Sentry platform and SDKs
+    - `platforms/python/profiling/`: Python profiling documentation
+
+  - `vroom/`: Go-based profiling service for processing profile data
+    - Responsible for transforming raw profile data into flame graphs
+    - Handles profile storage and retrieval
+    - Supports multiple platforms (Android, iOS, JavaScript, Python, etc.)
 
 ## Relay - Sentry's Ingestion Proxy
 
