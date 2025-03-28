@@ -19,12 +19,16 @@ original_add_profile_chunk = Envelope.add_profile_chunk
 # Create patched methods that set platform to "android"
 def patched_profile_to_json(self, event_opt, options):
     result = original_profile_to_json(self, event_opt, options)
+    if result.get("platform") == "python":
+        print(f"DEBUG: Changing Profile platform from 'python' to 'android'")
     result["platform"] = "android"
     return result
 
 
 def patched_profile_chunk_to_json(self, profiler_id, options, sdk_info):
     result = original_profile_chunk_to_json(self, profiler_id, options, sdk_info)
+    if result.get("platform") == "python":
+        print(f"DEBUG: Changing ProfileChunk platform from 'python' to 'android'")
     result["platform"] = "android"
     return result
 
@@ -33,9 +37,14 @@ def patched_profile_chunk_to_json(self, profiler_id, options, sdk_info):
 def patched_add_profile_chunk(self, profile_chunk):
     # Force "android" platform in the profile_chunk itself
     if isinstance(profile_chunk, dict):
+        orig_platform = profile_chunk.get("platform")
         profile_chunk["platform"] = "android"
+        print(
+            f"DEBUG: Setting profile_chunk platform from '{orig_platform}' to 'android'"
+        )
 
     # Use original method but ensure platform header is "android"
+    print(f"DEBUG: Forcing envelope profile_chunk header platform to 'android'")
     self.add_item(
         Item(
             payload=PayloadRef(json=profile_chunk),
@@ -64,7 +73,11 @@ def before_send(event, hint):
     # https://github.com/getsentry/sentry/blob/c3420bc3a670ba88cb37b9a40ceede748cafdf50/src/sentry/profiles/task.py#L47
     #
     # Comment out for profile hours (PROFILE_DURATION)
+    original_platform = event.get("platform")
     event["platform"] = "android"
+    print(
+        f"DEBUG: before_send: Changed event platform from '{original_platform}' to 'android'"
+    )
 
     # Recursively replace any "python" platform values with "android"
     def replace_platform_recursively(obj):
@@ -72,6 +85,9 @@ def before_send(event, hint):
             for key, value in obj.items():
                 if key == "platform" and value == "python":
                     obj[key] = "android"
+                    print(
+                        f"DEBUG: Recursively changed nested platform from 'python' to 'android'"
+                    )
                 elif isinstance(value, (dict, list)):
                     replace_platform_recursively(value)
         elif isinstance(obj, list):
