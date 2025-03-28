@@ -17,53 +17,57 @@ from sentry_sdk.profiler.continuous_profiler import ProfileChunk
 from sentry_sdk.profiler.transaction_profiler import Profile
 from sentry_sdk.tracing import Span
 
-# Save original methods
+# Save original methods - we'll patch these to modify the platform
 original_profile_to_json = Profile.to_json
 original_profile_chunk_to_json = ProfileChunk.to_json
 original_add_profile_chunk = Envelope.add_profile_chunk
 
+PLATFORM = "javascript"
 
-# Create patched methods that set platform to "android"
+# Create patched methods that set platform to PLATFORM
 def patched_profile_to_json(self, event_opt, options):
     result = original_profile_to_json(self, event_opt, options)
     if result.get("platform") == "python":
-        print(f"DEBUG: Changing Profile platform from 'python' to 'android'")
-    result["platform"] = "android"
+        print(f"DEBUG: Changing Profile platform from 'python' to '{PLATFORM}'")
+    # Force platform to PLATFORM (which is in UI_PROFILE_PLATFORMS)
+    # This affects regular profiles (not continuous profiling chunks)
+    result["platform"] = PLATFORM
     return result
 
 
 def patched_profile_chunk_to_json(self, profiler_id, options, sdk_info):
     result = original_profile_chunk_to_json(self, profiler_id, options, sdk_info)
-    if result.get("platform") == "python":
-        print(f"DEBUG: Changing ProfileChunk platform from 'python' to 'android'")
-    # Ensure platform is set to "android" in the profile chunk JSON
-    # This is one of the platforms in UI_PROFILE_PLATFORMS in Sentry
-    # See sentry/profiles/task.py:UI_PROFILE_PLATFORMS = {"cocoa", "android", "javascript"}
-    # This ensures proper categorization as PROFILE_DURATION_UI in Relay and Sentry
-    result["platform"] = "android"
+    # Critical: override platform in ProfileChunk payload
+    # This is what Sentry uses to categorize as UI_PROFILE_PLATFORMS
+    # and track as PROFILE_DURATION_UI
+    if result.get("platform") != PLATFORM:
+        print(f"DEBUG: Changing ProfileChunk platform from '{result.get('platform')}' to '{PLATFORM}'")
+    # Must be one of UI_PROFILE_PLATFORMS = {"cocoa", "android", "javascript"}
+    # See sentry/profiles/task.py:UI_PROFILE_PLATFORMS
+    result["platform"] = PLATFORM
     return result
 
 
-# Patch Envelope.add_profile_chunk to force "android" platform
+# Patch Envelope.add_profile_chunk to force platform
 def patched_add_profile_chunk(self, profile_chunk):
-    # Force "android" platform in the profile_chunk itself
+    # Force platform in the profile_chunk itself
     if isinstance(profile_chunk, dict):
         orig_platform = profile_chunk.get("platform")
-        profile_chunk["platform"] = "android"
+        profile_chunk["platform"] = PLATFORM
         print(
-            f"DEBUG: Setting profile_chunk platform from '{orig_platform}' to 'android'"
+            f"DEBUG: Setting profile_chunk platform from '{orig_platform}' to '{PLATFORM}'"
         )
 
-    # Use original method but ensure platform header is "android"
-    # This is critical for UI profile hours (PROFILE_DURATION_UI) in Relay
-    # The platform in the header determines whether a profile chunk is UI or backend
-    # See relay/relay-profiling/src/lib.rs:ProfileChunk::profile_type() method
-    print(f"DEBUG: Forcing envelope profile_chunk header platform to 'android'")
+    # CRITICALLY IMPORTANT: Set platform in envelope header
+    # Relay uses this header to identify UI profile chunks in the fast path
+    # See relay-profiling/src/lib.rs:ProfileChunk::profile_type() method
+    # This determines categorization as UI vs backend profile hours
+    print(f"DEBUG: Forcing envelope profile_chunk header platform to '{PLATFORM}'")
     self.add_item(
         Item(
             payload=PayloadRef(json=profile_chunk),
             type="profile_chunk",
-            headers={"platform": "android"},
+            headers={"platform": PLATFORM},  # This header is critical for proper categorization
         )
     )
 
@@ -88,19 +92,19 @@ def before_send(event, hint):
     # 
     # This is critical for profile hours (UI PROFILE_DURATION)
     original_platform = event.get("platform")
-    event["platform"] = "android"
+    event["platform"] = PLATFORM
     print(
-        f"DEBUG: before_send: Changed event platform from '{original_platform}' to 'android'"
+        f"DEBUG: before_send: Changed event platform from '{original_platform}' to '{PLATFORM}'"
     )
 
-    # Recursively replace any "python" platform values with "android"
+    # Recursively replace any "python" platform values with PLATFORM
     def replace_platform_recursively(obj):
         if isinstance(obj, dict):
             for key, value in obj.items():
                 if key == "platform" and value == "python":
-                    obj[key] = "android"
+                    obj[key] = PLATFORM
                     print(
-                        f"DEBUG: Recursively changed nested platform from 'python' to 'android'"
+                        f"DEBUG: Recursively changed nested platform from 'python' to '{PLATFORM}'"
                     )
                 elif isinstance(value, (dict, list)):
                     replace_platform_recursively(value)
@@ -128,6 +132,7 @@ sentry_sdk.init(
     before_send=before_send,  # Add before_send hook to modify the platform
     _experiments={
         "continuous_profiling_auto_start": True,
+        "continuous_profiling_debug": True,  # Enable debug for more verbose output
     },
 )
 
@@ -163,15 +168,44 @@ def cpu_intensive_task():
 sentry_sdk.profiler.start_profiler()
 
 
+def verify_profile_platform(profile):
+    """
+    Verify the platform in a profile chunk is correctly set to '{PLATFORM}'.
+    This is a helper function to validate our monkey patching is working correctly.
+    """
+    if isinstance(profile, dict):
+        platform = profile.get("platform")
+        if platform != PLATFORM:
+            print(f"WARNING: Profile platform is '{platform}', not '{PLATFORM}'")
+        else:
+            print(f"SUCCESS: Profile platform correctly set to '{platform}'")
+    return profile
+
 def main():
     try:
+        # Verify our patches are working by checking the platform in ProfileChunk
+        # Patch the to_json method to include our verification
+        original_chunk_to_json = ProfileChunk.to_json
+        
+        def verified_to_json(self, profiler_id, options, sdk_info):
+            result = original_chunk_to_json(self, profiler_id, options, sdk_info)
+            return verify_profile_platform(result)
+            
+        ProfileChunk.to_json = verified_to_json
+        
+        print("=" * 50)
+        print("PROFILE HOURS TEST SCRIPT")
+        print("This script tests UI profile hours (PROFILE_DURATION_UI) by spoofing")
+        print(f"the platform to '{PLATFORM}' (one of UI_PROFILE_PLATFORMS)")
+        print("=" * 50)
+        
         while True:  # Infinite loop
             # Start the profiler
             sentry_sdk.profiler.start_profiler()
 
             with sentry_sdk.start_transaction(name="test-transaction"):
 
-                print("Starting test events...")
+                print("\nStarting test events...")
 
                 with Span(op="child-operation", description="test-child-span"):
                     # Send test error
@@ -191,6 +225,10 @@ def main():
 
             # Stop the profiler
             sentry_sdk.profiler.stop_profiler()
+            
+            # Delay between iterations
+            print("\nWaiting 5 seconds before next iteration...\n")
+            time.sleep(5)
 
     except KeyboardInterrupt:
         print("\nShutting down gracefully...")
