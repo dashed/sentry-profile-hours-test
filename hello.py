@@ -11,6 +11,16 @@ AVAILABLE_DSNS = {
 # See relay-profiling/src/lib.rs:ProfileChunk::profile_type() for the canonical Relay source
 UI_PLATFORMS = ("javascript", "android", "cocoa")
 
+# === QUICK START FOR PROFILE HOURS TESTING ===
+#
+# For the fastest way to generate profile hours for billing testing:
+#
+# 1. Set PROFILE_TYPE to your preferred mode ("continuous" or "transaction")
+# 2. Set PLATFORM to a UI platform if testing UI profile hours ("javascript", "android", "cocoa") 
+# 3. Set MOCK_DURATION_HOURS to the number of hours you want to generate
+# 4. Set DIRECT_CHUNK_GENERATION = True to enable ultra-fast generation
+# 5. Run the script - it will generate the specified hours of profile data in seconds
+
 # === PROFILING MODE CONFIGURATION ===
 #
 # PROFILE_TYPE determines which of Sentry's two profiling modes to use:
@@ -49,8 +59,8 @@ PLATFORM = "python"  # Options: "javascript", "android", "cocoa" (for UI profile
 
 # === TIMESTAMP MOCKING CONFIGURATION ===
 #
-# MOCK_TIMESTAMPS enables simulating longer profiling durations without actually running that long.
-# This is critical for testing profile hours billing since:
+# MOCK_TIMESTAMPS enables simulating longer profiling durations in standard profiling mode.
+# This option only affects standard SDK profiling (when DIRECT_CHUNK_GENERATION is False):
 #
 # - When enabled: Profile timestamps are manipulated to appear spread across MOCK_DURATION_HOURS
 #   without needing to run the process for that entire time.
@@ -58,16 +68,21 @@ PLATFORM = "python"  # Options: "javascript", "android", "cocoa" (for UI profile
 # - When disabled: Real timestamps from actual execution are used, meaning you'd need to
 #   run the process for the entire duration you want to test.
 #
+# When using DIRECT_CHUNK_GENERATION, timestamps are always mocked based on MOCK_DURATION_HOURS,
+# and this setting is ignored.
+#
 # For transaction profiling: This extends the relative_end_ns of transactions
 # For continuous profiling: This spreads samples across multiple 60-second windows
-MOCK_TIMESTAMPS = False  # Set to True to mock longer profiles without actually running that long
+MOCK_TIMESTAMPS = False  # Set to True to mock longer profiles in standard profiling mode
 
 # MOCK_DURATION_HOURS sets how many hours of profiling data to simulate.
 # This controls:
-# - How many chunks are generated in continuous mode (approximately 60 per hour)
-# - The effective duration of transaction profiles
+# - How many chunks are generated in direct generation mode (approximately 60 per hour)
+# - The effective duration of profiles when using timestamp mocking
 # - The total billable profile hours that will be generated
 #
+# This setting is used by both direct generation and standard profiling with MOCK_TIMESTAMPS.
+# 
 # NOTE: In AM3 plans, this directly correlates to the number of profile hours
 # that will be counted for billing purposes.
 MOCK_DURATION_HOURS = 1.0  # How many hours to simulate for each profile session
@@ -89,12 +104,14 @@ MOCK_SAMPLES_PER_HOUR = 3600  # How many samples per hour to generate (if mockin
 #
 # - When disabled:
 #   * Uses the standard SDK profiling mechanisms with patches
-#   * Still mocks timestamps but works through the regular buffers
 #   * More closely simulates real SDK behavior
 #   * Much slower generation rate
 #
-# IMPORTANT: This option only applies when MOCK_TIMESTAMPS is also enabled.
-# For billing tests where you need to generate many profile hours, keep this enabled.
+# The direct chunk generation will automatically use MOCK_DURATION_HOURS to 
+# determine how much profile data to generate and will create timestamps 
+# spread across that duration.
+#
+# For billing tests where you need to generate many profile hours quickly, enable this option.
 DIRECT_CHUNK_GENERATION = False  # Set to True to generate chunks directly (bypasses profiler)
 
 # SAMPLES_PER_CHUNK controls how many stack samples are included in each profile chunk
@@ -976,8 +993,8 @@ def main():
             
         ProfileChunk.to_json = verified_to_json
         
-        # Increase sampling frequency (only needed for non-mocked profiles)
-        if not MOCK_TIMESTAMPS:
+        # Increase sampling frequency (only needed for standard profiling mode)
+        if not DIRECT_CHUNK_GENERATION:
             increase_sampling_frequency()
         
         print("=" * 50)
@@ -985,13 +1002,12 @@ def main():
         print(f"Profile type: {PROFILE_TYPE}")
         print(f"Platform: {PLATFORM}")
         print(f"Mock timestamps: {'Enabled' if MOCK_TIMESTAMPS else 'Disabled'}")
-        if MOCK_TIMESTAMPS:
-            print(f"Mock duration: {MOCK_DURATION_HOURS} hours")
-            print(f"Direct chunk generation: {'Enabled' if DIRECT_CHUNK_GENERATION else 'Disabled'}")
+        print(f"Mock duration: {MOCK_DURATION_HOURS} hours")
+        print(f"Direct chunk generation: {'Enabled' if DIRECT_CHUNK_GENERATION else 'Disabled'}")
         print("=" * 50)
         
         # Use direct chunk generation if configured
-        if MOCK_TIMESTAMPS and DIRECT_CHUNK_GENERATION:
+        if DIRECT_CHUNK_GENERATION:
             print("\nDirect chunk generation mode enabled")
             if PROFILE_TYPE == "continuous":
                 print("This will generate hours of continuous profile data in seconds")
