@@ -438,11 +438,47 @@ The `hello.py` file contains a comprehensive example of mocking profile hours, w
    - Patches write methods to inject additional samples
    - Patches buffer processing to spread samples across mocked timespan
 
-3. **Direct Chunk Generation:**
-   - Bypasses SDK buffers and scheduling for ultra-fast generation
-   - Creates and sends profile chunks directly to transport
-   - Generates hours of profile data in seconds (64+ hours/second)
-   - Ensures proper 60-second window distribution for Vroom compatibility
+3. **Ultra-Fast Direct Generation:**
+   - **Continuous Profiling Mode:**
+     - Bypasses SDK buffers and scheduling for ultra-fast generation
+     - Creates and sends profile chunks directly to transport
+     - Generates ~60 chunks per hour of simulated duration
+     - Ensures proper 60-second window distribution for Vroom compatibility
+   
+   - **Transaction Profiling Mode:**
+     - Generates synthetic transaction + profile pairs
+     - Directly manipulates `relative_end_ns` to simulate lengthy profiles
+     - Creates proper envelope structure with both transaction and profile
+     - Distributes transactions evenly across mocked duration
+
+## Profile Hours Billing in Different Plan Types
+
+Sentry offers different plan types (AM2 and AM3) with different billing models for profiling:
+
+### AM2 Plans
+- **Transaction-based profiling:** Billed as a separate category
+- **Continuous profiling:** Billed as profile hours (UI and non-UI separately)
+
+### AM3 Plans
+- **No separate transaction profiling billing**
+- **All profiling is billed as profile hours**
+- Transaction profiles are automatically converted to profile hours
+- Categorization is based on platform (UI vs non-UI)
+
+### Implications for Testing
+
+1. **Platform Setting is Critical:**
+   - In both plans, the `PLATFORM` setting determines UI vs non-UI categorization
+   - UI platforms (javascript, android, cocoa) are billed differently than backend platforms
+
+2. **Testing AM3 Plans:**
+   - Both transaction and continuous profiling can be used to generate profile hours
+   - Platform spoofing ensures correct UI/non-UI categorization
+   - Direct generation works for both modes
+
+3. **Testing AM2 Plans:**
+   - Need to test transaction profiling and continuous profiling separately
+   - Direct generation supports both for ultra-fast testing
 
 ## Useful Code Snippets
 
@@ -490,3 +526,52 @@ with sentry_sdk.start_transaction(name="my-transaction"):
     # Transaction is automatically profiled if profiles_sample_rate > 0
     pass
 ```
+
+## Direct Transaction Profile Generation
+
+The transaction profile generation function (`generate_direct_transaction_profiles()`) is similar to the continuous profile chunk generation function, but with key differences to account for the unique structure of transaction profiling:
+
+### Key Components
+
+1. **Profile-Transaction Pairing:**
+   - Transaction profiles must be attached to a transaction event
+   - Both are sent in the same envelope
+   - They share the same `trace_id` and other metadata for proper linking
+
+2. **Timestamp Format Differences:**
+   - Transaction profiles use string-represented nanosecond offsets from start
+   - Uses `elapsed_since_start_ns` instead of absolute timestamps
+   - Sample format example: `{"elapsed_since_start_ns": "1000000000", "thread_id": "123", "stack_id": 0}`
+
+3. **Mocking Duration:**
+   - The critical field for duration mocking is `relative_end_ns` in the transaction object
+   - Setting this to a large value simulates a longer profile
+   - Example: `"relative_end_ns": "3600000000000"` for a 1-hour profile
+
+4. **Envelope Structure:**
+   ```python
+   envelope = Envelope()
+   # Add transaction first
+   envelope.add_item(
+       Item(
+           payload=PayloadRef(json=transaction_event),
+           type="transaction",
+           headers={"platform": PLATFORM}
+       )
+   )
+   # Add profile second
+   envelope.add_item(
+       Item(
+           payload=PayloadRef(json=profile_payload),
+           type="profile",
+           headers={"platform": PLATFORM}
+       )
+   )
+   ```
+
+### Key Observations
+
+1. **In AM3 plans**, transaction profiles contribute to profile hours just like continuous profiles
+2. **Platform setting** is crucial in both cases for proper UI vs non-UI categorization
+3. **Density of transactions** can be adjusted (we use ~10 per hour by default)
+4. **Structure differs** but the direct generation approach works for both types
