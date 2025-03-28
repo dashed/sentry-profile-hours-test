@@ -1,10 +1,8 @@
 import random
 import time
-import uuid
-from datetime import datetime, timezone
 
 import sentry_sdk
-from sentry_sdk import capture_exception, capture_message, set_tag
+from sentry_sdk import capture_exception, capture_message
 from sentry_sdk.envelope import Envelope, Item, PayloadRef
 from sentry_sdk.profiler.continuous_profiler import ProfileChunk
 
@@ -29,17 +27,11 @@ PLATFORM = "javascript"
 # Create patched methods that set platform to PLATFORM
 def patched_profile_to_json(self, event_opt, options):
     result = original_profile_to_json(self, event_opt, options)
-    orig_platform = result.get("platform")
-    if orig_platform == "python":
-        print(f"DEBUG: Changing Profile platform from '{orig_platform}' to '{PLATFORM}'")
+    if result.get("platform") == "python":
+        print(f"DEBUG: Changing Profile platform from 'python' to '{PLATFORM}'")
     # Force platform to PLATFORM (which is in UI_PROFILE_PLATFORMS)
     # This affects regular profiles (not continuous profiling chunks)
     result["platform"] = PLATFORM
-    
-    # Add debugging tags to help identify these profiles in Sentry
-    result["tags"] = result.get("tags", {})
-    result["tags"]["profile_spoof"] = "true"
-    result["tags"]["original_platform"] = orig_platform
     return result
 
 
@@ -48,27 +40,11 @@ def patched_profile_chunk_to_json(self, profiler_id, options, sdk_info):
     # Critical: override platform in ProfileChunk payload
     # This is what Sentry uses to categorize as UI_PROFILE_PLATFORMS
     # and track as PROFILE_DURATION_UI
-    orig_platform = result.get("platform")
-    if orig_platform != PLATFORM:
-        print(f"DEBUG: Changing ProfileChunk platform from '{orig_platform}' to '{PLATFORM}'")
+    if result.get("platform") != PLATFORM:
+        print(f"DEBUG: Changing ProfileChunk platform from '{result.get('platform')}' to '{PLATFORM}'")
     # Must be one of UI_PROFILE_PLATFORMS = {"cocoa", "android", "javascript"}
     # See sentry/profiles/task.py:UI_PROFILE_PLATFORMS
     result["platform"] = PLATFORM
-    
-    # Add additional debugging fields to the profile chunk
-    # These won't affect processing but help with debugging
-    result["debug_info"] = {
-        "original_platform": orig_platform,
-        "spoofed_platform": PLATFORM,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "test_id": str(uuid.uuid4())[:8]
-    }
-    
-    # Add tags if possible (may not be used in processing)
-    if not result.get("tags"):
-        result["tags"] = {}
-    result["tags"]["profile_debug"] = "true"
-    
     return result
 
 
@@ -120,22 +96,6 @@ def before_send(event, hint):
     print(
         f"DEBUG: before_send: Changed event platform from '{original_platform}' to '{PLATFORM}'"
     )
-
-    # Add debugging tags to events
-    # These will be visible in Sentry UI and searchable
-    if not event.get("tags"):
-        event["tags"] = {}
-    event["tags"]["ui_profile_test"] = "true"
-    event["tags"]["original_platform"] = original_platform
-    event["tags"]["platform_override"] = PLATFORM
-    event["tags"]["test_timestamp"] = datetime.now(timezone.utc).isoformat()
-    # Generate a unique test ID to identify this run
-    test_id = str(uuid.uuid4())[:8]
-    event["tags"]["test_run_id"] = test_id
-    
-    # Add this to SDK scope too - will be added to all future events
-    set_tag("ui_profile_test", "true") 
-    set_tag("test_run_id", test_id)
 
     # Recursively replace any "python" platform values with PLATFORM
     def replace_platform_recursively(obj):
@@ -210,24 +170,15 @@ sentry_sdk.profiler.start_profiler()
 
 def verify_profile_platform(profile):
     """
-    Verify the platform in a profile chunk is correctly set to PLATFORM.
+    Verify the platform in a profile chunk is correctly set to '{PLATFORM}'.
     This is a helper function to validate our monkey patching is working correctly.
     """
     if isinstance(profile, dict):
         platform = profile.get("platform")
-        debug_info = profile.get("debug_info", {})
-        
         if platform != PLATFORM:
             print(f"WARNING: Profile platform is '{platform}', not '{PLATFORM}'")
         else:
             print(f"SUCCESS: Profile platform correctly set to '{platform}'")
-            print(f"DEBUG INFO: {debug_info}")
-            
-        # Add more debug info about the profile chunk
-        print(f"Profile keys: {list(profile.keys())}")
-        if "client_sdk" in profile:
-            print(f"SDK: {profile['client_sdk']}")
-            
     return profile
 
 def main():
@@ -252,16 +203,11 @@ def main():
             # Start the profiler
             sentry_sdk.profiler.start_profiler()
 
-            with sentry_sdk.start_transaction(name="test-transaction") as transaction:
-                # Add test tags to the transaction
-                transaction.set_tag("ui_profile_test", "true")
-                transaction.set_tag("platform_override", PLATFORM)
-                
+            with sentry_sdk.start_transaction(name="test-transaction"):
+
                 print("\nStarting test events...")
 
-                with Span(op="child-operation", description="test-child-span") as span:
-                    # Add tags to span too
-                    span.set_tag("ui_profile_test", "true")
+                with Span(op="child-operation", description="test-child-span"):
                     # Send test error
                     simulate_error()
 
@@ -269,11 +215,7 @@ def main():
                 create_test_transaction()
 
                 # Run CPU intensive task multiple times or for longer duration
-                for i in range(50):  # Run multiple iterations
-                    # Set measurement to show in profile
-                    if i % 10 == 0:
-                        transaction.set_measurement(f"ui_test_{i}", i * 10, "millisecond")
-                    
+                for _ in range(50):  # Run multiple iterations
                     cpu_intensive_task()
                     time.sleep(
                         0.05 + random.uniform(0, 0.05)
