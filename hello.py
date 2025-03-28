@@ -131,8 +131,8 @@ DEBUG_PROFILING = True  # Set to True for verbose debugging info
 MINIMUM_SAMPLES = 3  # Minimum number of samples to ensure are collected
 
 # ----------------------- IMPLEMENTATION -----------------------
+import platform  # Import the standard platform module for system info
 import random
-import sys
 import threading
 import time
 import uuid
@@ -956,8 +956,12 @@ def main():
         # Use direct chunk generation if configured
         if MOCK_TIMESTAMPS and DIRECT_CHUNK_GENERATION:
             print("\nDirect chunk generation mode enabled")
-            print("This will generate hours of profile data in seconds")
-            generate_direct_profile_chunks()
+            if PROFILE_TYPE == "continuous":
+                print("This will generate hours of continuous profile data in seconds")
+                generate_direct_profile_chunks()
+            else:
+                print("This will generate hours of transaction profile data in seconds")
+                generate_direct_transaction_profiles()
         else:
             while True:  # Infinite loop
                 run_iteration()
@@ -1093,6 +1097,275 @@ def generate_direct_profile_chunks():
     print(f"\nGeneration complete: {chunks_generated} chunks ({MOCK_DURATION_HOURS} hours) "
           f"generated in {total_time:.2f} seconds")
     print(f"Generation speed: {chunks_generated / total_time:.1f} chunks/second "
+          f"({MOCK_DURATION_HOURS / total_time:.2f} hours/second)")
+    
+    # Offer to run more if needed
+    print(f"\nTip: To generate more data, increase MOCK_DURATION_HOURS at the top of the script.")
+
+
+def generate_direct_transaction_profiles():
+    """
+    Generate and send transaction profiles directly without using the SDK's transaction mechanism.
+    This allows generating hours worth of transaction profile data in seconds.
+    
+    Unlike continuous profiling which sends chunks regularly, transaction profiling attaches 
+    profiles to transactions. This function creates synthetic transactions with attached profiles
+    that simulate lengthy durations.
+    """
+    print(f"\nGenerating {MOCK_DURATION_HOURS} hours of transaction profile data directly")
+    
+    # Calculate how many transactions/profiles to generate
+    # We'll create approximately 10 transactions per hour
+    transactions_to_generate = max(1, int(MOCK_DURATION_HOURS * 10))
+    
+    print(f"Will generate {transactions_to_generate} transactions with profiles")
+    print(f"Each profile will have approximately {SAMPLES_PER_CHUNK} samples")
+    
+    # Get the client and its options
+    client = sentry_sdk.get_client()
+    if not client or not client.options:
+        print("ERROR: Could not access Sentry client or options")
+        return
+    
+    # Get the capture function - this is what actually sends the envelope to Sentry
+    capture_func = None
+    if hasattr(client, 'transport') and client.transport:
+        if hasattr(client.transport, 'capture_envelope'):
+            capture_func = client.transport.capture_envelope
+    
+    if not capture_func:
+        print("ERROR: Could not access capture_envelope function")
+        return
+    
+    # Set up progress tracking
+    start_time = time.time()
+    last_report_time = start_time
+    profiles_generated = 0
+    
+    print("\nGenerating and sending transaction profiles...")
+    
+    # Time base for transactions
+    base_timestamp = datetime.now(timezone.utc).timestamp()
+    
+    # For transaction profiles, we'll distribute profiles across the mocked duration
+    hours_in_seconds = MOCK_DURATION_HOURS * 3600
+    
+    # Generate each transaction with profile
+    for idx in range(transactions_to_generate):
+        # Generate unique IDs
+        event_id = uuid.uuid4().hex
+        trace_id = "".join(["{:02x}".format(random.randint(0, 255)) for _ in range(16)])
+        profile_id = uuid.uuid4().hex
+        
+        # Calculate where in the mocked duration this transaction fits
+        # Spread transactions evenly across the mocked duration
+        relative_position = idx / transactions_to_generate
+        transaction_timestamp = base_timestamp + (relative_position * hours_in_seconds)
+        
+        # Create profile start timestamp
+        profile_start_ns = int(nanosecond_time())
+        
+        # Calculate how long this profile should appear to run
+        # For transaction profiles, we can't exceed 30 seconds in reality
+        # But we can fake longer durations in the transaction metadata
+        tx_duration_sec = min(30.0, hours_in_seconds / transactions_to_generate)
+        
+        # For transaction profiles, instead of representing absolute timestamps,
+        # samples use nanosecond offsets from the start of the profile
+        samples = []
+        frames = []
+        stacks = []
+        indexed_frames = {}
+        indexed_stacks = {}
+        
+        # Generate synthetic samples for this profile
+        for i in range(SAMPLES_PER_CHUNK):
+            # Create a synthetic sample with stack
+            tid, stack_data = generate_synthetic_profile_sample()[0]
+            stack_id, frame_ids, frame_objects = stack_data
+            
+            # Calculate offset within the transaction duration (in nanoseconds)
+            # We need to spread samples throughout the profile
+            relative_offset = (i / SAMPLES_PER_CHUNK) * tx_duration_sec * 1_000_000_000
+            
+            # Create frame references (just like in Profile.write)
+            if stack_id not in indexed_stacks:
+                for j, frame_id in enumerate(frame_ids):
+                    if frame_id not in indexed_frames:
+                        indexed_frames[frame_id] = len(indexed_frames)
+                        frames.append(frame_objects[j])
+                
+                indexed_stacks[stack_id] = len(indexed_stacks)
+                stacks.append([indexed_frames[frame_id] for frame_id in frame_ids])
+            
+            # Transaction profiles require string representation of nanosecond offsets
+            # This is different from continuous profiles which use Unix timestamps
+            samples.append({
+                "elapsed_since_start_ns": str(int(relative_offset)),
+                "thread_id": str(tid),
+                "stack_id": indexed_stacks[stack_id]
+            })
+        
+        # Get thread metadata
+        thread_metadata = {
+            str(thread.ident): {
+                "name": str(thread.name),
+            }
+            for thread in threading.enumerate()
+        }
+        
+        # Create the processed profile
+        processed_profile = {
+            "frames": frames,
+            "stacks": stacks,
+            "samples": samples,
+            "thread_metadata": thread_metadata,
+        }
+        
+        # Create the full profile payload (like Profile.to_json)
+        profile_payload = {
+            "environment": client.options.get("environment"),
+            "event_id": profile_id,
+            "platform": PLATFORM,  # Override to target platform
+            "profile": processed_profile,
+            "release": client.options.get("release", ""),
+            "timestamp": transaction_timestamp,
+            "version": "1",
+            "device": {
+                "architecture": platform.machine(),
+            },
+            "os": {
+                "name": platform.system(),
+                "version": platform.release(),
+            },
+            "runtime": {
+                "name": platform.python_implementation(),
+                "version": platform.python_version(),
+            },
+            "transactions": [
+                {
+                    "id": event_id,
+                    "name": f"synthetic-transaction-{idx}",
+                    "relative_start_ns": "0",
+                    # This is the critical field for mocking long durations
+                    # We set it to the entire mocked duration in nanoseconds
+                    "relative_end_ns": str(int(MOCK_DURATION_HOURS * 3600 * 1_000_000_000 / transactions_to_generate)),
+                    "trace_id": trace_id,
+                    # Get the current thread ID (same way the SDK does)
+                    "active_thread_id": str(threading.get_ident()),
+                }
+            ],
+            # Add debugging info
+            "debug_info": {
+                "original_platform": "python",
+                "spoofed_platform": PLATFORM,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "test_id": str(uuid.uuid4())[:8],
+                "mock_timestamp": "true",
+                "mock_duration_hours": str(MOCK_DURATION_HOURS),
+                "transaction_index": idx,
+                "direct_generation": "true"
+            }
+        }
+        
+        # Create a matching transaction event
+        transaction_duration = tx_duration_sec  # In seconds
+        transaction_event = {
+            "event_id": event_id,
+            "type": "transaction",
+            "transaction": f"synthetic-transaction-{idx}",
+            "platform": PLATFORM,  # Override to target platform
+            "timestamp": datetime.fromtimestamp(transaction_timestamp, tz=timezone.utc).isoformat(),
+            "start_timestamp": datetime.fromtimestamp(transaction_timestamp, tz=timezone.utc).isoformat(),
+            # Add all the expected transaction fields
+            "contexts": {
+                "trace": {
+                    "trace_id": trace_id,
+                    "span_id": uuid.uuid4().hex[:16],
+                    "op": "synthetic",
+                    "status": "ok"
+                }
+            },
+            "tags": {
+                "transaction": f"synthetic-transaction-{idx}",
+                "synthetic": "true",
+                "mock_duration_hours": str(MOCK_DURATION_HOURS),
+                "ui_profile_test": "true",
+                "platform_override": PLATFORM,
+                "original_platform": "python"
+            },
+            # Add some spans for realism
+            "spans": [
+                {
+                    "span_id": uuid.uuid4().hex[:16],
+                    "parent_span_id": trace_id,
+                    "start_timestamp": transaction_timestamp,
+                    "timestamp": transaction_timestamp + (transaction_duration * 0.5),
+                    "description": "Synthetic child span",
+                    "op": "child-operation"
+                }
+            ],
+            "measurements": {
+                "synthetic_metric": {
+                    "value": random.randint(10, 100),
+                    "unit": "millisecond"
+                }
+            }
+        }
+        
+        # Create an envelope with both the transaction and its profile
+        envelope = Envelope()
+        
+        # Add the transaction
+        envelope.add_item(
+            Item(
+                payload=PayloadRef(json=transaction_event),
+                type="transaction",
+                headers={"platform": PLATFORM}  # Set platform in headers
+            )
+        )
+        
+        # Add the profile
+        envelope.add_item(
+            Item(
+                payload=PayloadRef(json=profile_payload),
+                type="profile",
+                headers={"platform": PLATFORM}  # Critical for UI profile hours
+            )
+        )
+        
+        # Send the envelope directly
+        capture_func(envelope)
+        
+        # Update tracking
+        profiles_generated += 1
+        
+        # Report progress periodically
+        current_time = time.time()
+        if (current_time - last_report_time) >= 0.5 or profiles_generated == transactions_to_generate:
+            last_report_time = current_time
+            elapsed = current_time - start_time
+            progress = (profiles_generated / transactions_to_generate) * 100
+            
+            # Calculate hours covered based on proportion of profiles generated
+            time_covered = (profiles_generated / transactions_to_generate) * MOCK_DURATION_HOURS
+            
+            # Estimate completion time
+            if profiles_generated > 0 and elapsed > 0:
+                profiles_per_second = profiles_generated / elapsed
+                remaining_profiles = transactions_to_generate - profiles_generated
+                estimated_remaining_seconds = remaining_profiles / profiles_per_second if profiles_per_second > 0 else 0
+                
+                print(f"Progress: {profiles_generated}/{transactions_to_generate} profiles "
+                      f"({progress:.1f}%, {time_covered:.2f} hours covered), "
+                      f"Rate: {profiles_per_second:.1f} profiles/s, "
+                      f"ETA: {estimated_remaining_seconds:.1f}s")
+    
+    # Final report
+    total_time = time.time() - start_time
+    print(f"\nGeneration complete: {profiles_generated} transaction profiles ({MOCK_DURATION_HOURS} hours) "
+          f"generated in {total_time:.2f} seconds")
+    print(f"Generation speed: {profiles_generated / total_time:.1f} profiles/second "
           f"({MOCK_DURATION_HOURS / total_time:.2f} hours/second)")
     
     # Offer to run more if needed
