@@ -18,8 +18,12 @@ def before_send(event, hint):
     # https://github.com/getsentry/sentry/blob/c3420bc3a670ba88cb37b9a40ceede748cafdf50/src/sentry/profiles/task.py#L47
     #
     # Comment out for profile hours (PROFILE_DURATION)
-    # event["platform"] = "android"
+    event["platform"] = "android"
     return event
+
+
+def profiles_sampler(sampling_context):
+    return 1.0
 
 
 sentry_sdk.init(
@@ -27,6 +31,8 @@ sentry_sdk.init(
     # Set traces_sample_rate to 1.0 to capture 100%
     # of transactions for tracing.
     traces_sample_rate=1.0,
+    profile_session_sample_rate=1.0,
+    profiles_sample_rate=1.0,
     debug=True,
     before_send=before_send,  # Add before_send hook to modify the platform
     _experiments={
