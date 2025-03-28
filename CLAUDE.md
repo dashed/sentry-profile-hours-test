@@ -26,12 +26,121 @@
   - `sentry/`: Main Sentry backend/frontend codebase
   - `sentry-python/`: Python SDK for Sentry
   - `relay/`: Proxy service that validates and processes events
+  - `sentry-docs/`: Documentation for Sentry platform and SDKs
 
 ## Available Tools
 - `gh` (GitHub CLI) is available for GitHub operations
 
 ## React Testing
 - Use exports from 'sentry-test/reactTestingLibrary' instead of directly from '@testing-library/react'
+
+## Sentry Profiling Types: Transaction-Based vs Continuous
+
+Sentry supports two distinct profiling modes, each with different characteristics and use cases:
+
+### Transaction-Based Profiling
+
+Transaction-based profiling was Sentry's first profiling mode. It profiles code executed between `Sentry.startTransaction` and `transaction.finish` calls.
+
+**Key Characteristics:**
+- **Scope:** Limited to instrumented transactions
+- **Duration Limit:** Max 30 seconds per profile (prevents large payloads)
+- **Data Structure:** Uses string-represented nanosecond offsets from transaction start
+- **Implementation:**
+  - Time measurements use `elapsed_since_start_ns` (nanoseconds since start)
+  - Profiles are attached to transactions and sent in the same envelope
+  - Uses `Profile` class from `transaction_profiler.py`
+
+**Advantages:**
+- Automatically profiles only specifically instrumented parts of your application
+- Zero additional configuration if you're already using transactions
+- Lower overhead since profiling isn't always running
+
+**Limitations:**
+- Cannot profile long-running tasks (>30 seconds)
+- Only profiles instrumented code sections
+- Misses issues in non-instrumented portions of your application
+
+**Configuration:**
+```python
+sentry_sdk.init(
+    dsn="...",
+    traces_sample_rate=1.0,
+    profiles_sample_rate=1.0,  # Enable transaction profiling
+)
+
+# Profiling happens automatically with transactions
+with sentry_sdk.start_transaction(name="my-transaction"):
+    # Code here is automatically profiled
+    pass
+```
+
+### Continuous Profiling
+
+Continuous profiling mode runs the profiler continuously and regularly flushes "profile chunks" to the server.
+
+**Key Characteristics:**
+- **Scope:** Entire application runtime (not just transactions)
+- **Duration:** Unlimited - can profile for hours or days
+- **Data Structure:** Uses floating-point Unix timestamps (seconds since epoch)
+- **Implementation:**
+  - Uses absolute timestamps for each sample
+  - Regularly sends chunks (~60 seconds worth of data each)
+  - Uses `ProfileChunk` class from `continuous_profiler.py`
+  - Exposes explicit start/stop controls via SDK
+
+**Advantages:**
+- Provides visibility into your entire application, even non-instrumented parts
+- Can profile long-running workflows without limitations
+- Better overview of system-wide performance issues
+
+**Limitations:**
+- Higher overhead as profiler is always running
+- May capture idle time, resulting in less targeted data
+- Requires explicit start/stop calls (or configuration for auto-start)
+
+**Configuration:**
+```python
+sentry_sdk.init(
+    dsn="...",
+    traces_sample_rate=1.0,
+    profile_session_sample_rate=1.0,  # Enable continuous profiling
+)
+
+# Explicit start/stop control
+sentry_sdk.profiler.start_profiler()
+# ... code executed will be profiled until ...
+sentry_sdk.profiler.stop_profiler()
+```
+
+### Key Implementation Differences
+
+1. **Sampling Control:**
+   - Transaction profiling: Controlled by `profiles_sample_rate` or `profiles_sampler`
+   - Continuous profiling: Controlled by `profile_session_sample_rate`
+
+2. **Timestamp Format:**
+   - Transaction profiles: String-represented nanosecond offsets (e.g., `"elapsed_since_start_ns": "1000000000"`)
+   - Continuous profiles: Floating-point Unix timestamps (e.g., `"timestamp": 1710805788.500`)
+
+3. **Profile Structure:**
+   - Transaction profiles: Single profile with transaction context
+   - Continuous profiles: Series of profile chunks sent independently
+
+4. **Duration Handling:**
+   - Transaction profiles: Validate with `relative_end_ns` from transactions
+   - Continuous profiles: Validate with timestamp differences between profile samples
+
+5. **UI Differences in Sentry:**
+   - Transaction-based: View profiles attached to specific transactions
+   - Continuous: View aggregated flamegraphs across your entire application
+
+### Choosing Between Modes
+
+- Use transaction-based profiling when you want to focus on specific, instrumented parts of your application with lower overhead
+- Use continuous profiling when you need full visibility into your entire application or for long-running processes
+
+**Important Note:** These modes are mutually exclusive - you can't use both simultaneously in the same SDK initialization.
 
 ## Vroom - Sentry's Profiling Service
 
@@ -298,6 +407,19 @@ When working with profiles and particularly UI profile hours, these are the key 
    - For transaction profiles: Modify `relative_end_ns` in transactions
    - For continuous profiles: Manipulate timestamps in `ProfileChunk.samples`
 
+## Managing Profile Hours in the Sentry UI
+
+Once profile data is collected and processed, Sentry provides various UI views for analysis:
+
+1. **Performance Page:** Transactions with profiles show a link in the "Profile" column
+2. **Profile Summary Page:** Shows aggregated information from profiles collected under a specific transaction
+3. **Transactions Tab:** Lists transactions in descending order of execution time
+4. **Flamegraph Tab:** Shows aggregate flamegraph across transaction boundaries
+
+The UI distinguishes between transaction-based and continuous profiling:
+- Transaction-based profiling: Focus on individual transaction profiles
+- Continuous profiling: System-wide overview with aggregate flamegraphs 
+
 ## Mocking Profile Hours
 
 The `hello.py` file contains a comprehensive example of mocking profile hours, with these capabilities:
@@ -315,6 +437,12 @@ The `hello.py` file contains a comprehensive example of mocking profile hours, w
    - Patches `Profile.valid` to ensure profiles aren't discarded
    - Patches write methods to inject additional samples
    - Patches buffer processing to spread samples across mocked timespan
+
+3. **Direct Chunk Generation:**
+   - Bypasses SDK buffers and scheduling for ultra-fast generation
+   - Creates and sends profile chunks directly to transport
+   - Generates hours of profile data in seconds (64+ hours/second)
+   - Ensures proper 60-second window distribution for Vroom compatibility
 
 ## Useful Code Snippets
 
