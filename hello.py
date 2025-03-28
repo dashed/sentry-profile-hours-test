@@ -1100,8 +1100,8 @@ def generate_direct_profile_chunks():
         # Add tags for searchability in Sentry UI
         chunk_data["tags"] = {
             "profile_type": "continuous", 
-            "ui_profile_test": PLATFORM in ("javascript", "android", "cocoa"),  # Only true for UI platforms
-            "is_ui_platform": PLATFORM in ("javascript", "android", "cocoa"),  # Explicit tag for platform type
+            "ui_profile_test": PLATFORM in UI_PLATFORMS,  # Only true for UI platforms
+            "is_ui_platform": PLATFORM in UI_PLATFORMS,  # Explicit tag for platform type
             "synthetic": "true",
             "direct_generation": "true",
             "mock_duration_hours": str(MOCK_DURATION_HOURS),
@@ -1361,8 +1361,8 @@ def generate_direct_transaction_profiles():
             # Add tags for searchability in Sentry UI
             "tags": {
                 "profile_type": "transaction",
-                "ui_profile_test": PLATFORM in ("javascript", "android", "cocoa"),  # Only true for UI platforms
-                "is_ui_platform": PLATFORM in ("javascript", "android", "cocoa"),  # Explicit tag for platform type
+                "ui_profile_test": PLATFORM in UI_PLATFORMS,  # Only true for UI platforms
+                "is_ui_platform": PLATFORM in UI_PLATFORMS,  # Explicit tag for platform type
                 "synthetic": "true",
                 "direct_generation": "true",
                 "mock_duration_hours": str(MOCK_DURATION_HOURS),
@@ -1413,8 +1413,8 @@ def generate_direct_transaction_profiles():
                 "synthetic": "true",
                 "profile_type": "transaction",  # Explicitly mark as transaction profiling
                 "mock_duration_hours": str(MOCK_DURATION_HOURS),
-                "ui_profile_test": PLATFORM in ("javascript", "android", "cocoa"),  # Only true for UI platforms
-                "is_ui_platform": PLATFORM in ("javascript", "android", "cocoa"),  # Explicit tag for platform type
+                "ui_profile_test": PLATFORM in UI_PLATFORMS,  # Only true for UI platforms
+                "is_ui_platform": PLATFORM in UI_PLATFORMS,  # Explicit tag for platform type
                 "platform_override": PLATFORM,
                 "original_platform": "python",
                 "test_run_id": str(uuid.uuid4())[:8],  # Add unique test run ID
