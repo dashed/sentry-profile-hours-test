@@ -6,20 +6,228 @@ AVAILABLE_DSNS = {
     "profile-hours-am3-business": "https://e3be3e9fd4c48a23b3a65ec2e62743d1@o4508486299942912.ingest.de.sentry.io/4508486300729424",
 }
 
+# The DSN to use for this run - can be overridden by presets
+SELECTED_DSN = "profile-hours-am3-business"  # Default to AM3 plan
+
 # Define which platforms are considered UI platforms
 # These platforms get categorized as UI profile hours rather than backend profile hours
 # See relay-profiling/src/lib.rs:ProfileChunk::profile_type() for the canonical Relay source
 UI_PLATFORMS = ("javascript", "android", "cocoa")
 
-# === QUICK START FOR PROFILE HOURS TESTING ===
+# === PROFILE HOUR TESTING PRESETS ===
 #
-# For the fastest way to generate profile hours for billing testing:
+# Set the PRESET variable to quickly switch between different testing configurations.
+# Each preset configures PROFILE_TYPE, PLATFORM, DIRECT_CHUNK_GENERATION, and DSN for you.
+# 
+# Available presets (AM2 plans):
+# - "AM2_TRANSACTION_BACKEND": Transaction profiling with Python platform (AM2 transaction billing)
+# - "AM2_TRANSACTION_UI": Transaction profiling with JavaScript platform (AM2 transaction billing)
+# - "AM2_CONTINUOUS_BACKEND": Continuous profiling with Python platform (AM2 backend profile hours)
+# - "AM2_CONTINUOUS_UI": Continuous profiling with JavaScript platform (AM2 UI profile hours)
 #
-# 1. Set PROFILE_TYPE to your preferred mode ("continuous" or "transaction")
-# 2. Set PLATFORM to a UI platform if testing UI profile hours ("javascript", "android", "cocoa") 
-# 3. Set MOCK_DURATION_HOURS to the number of hours you want to generate
-# 4. Set DIRECT_CHUNK_GENERATION = True to enable ultra-fast generation
-# 5. Run the script - it will generate the specified hours of profile data in seconds
+# Available presets (AM3 plans):
+# - "AM3_TRANSACTION_BACKEND": Transaction converted to backend profile hours (AM3 plans)
+# - "AM3_TRANSACTION_UI": Transaction converted to UI profile hours (AM3 plans)
+# - "AM3_CONTINUOUS_BACKEND": Continuous backend profile hours (AM3 plans)
+# - "AM3_CONTINUOUS_UI": Continuous UI profile hours (AM3 plans)
+#
+# Fast Direct Generation (AM2 plans):
+# - "DIRECT_AM2_TRANSACTION_BACKEND": Fast transaction profiling with Python platform (AM2)
+# - "DIRECT_AM2_TRANSACTION_UI": Fast transaction profiling with JavaScript platform (AM2)
+# - "DIRECT_AM2_CONTINUOUS_BACKEND": Fast continuous profiling with Python platform (AM2)
+# - "DIRECT_AM2_CONTINUOUS_UI": Fast continuous profiling with JavaScript platform (AM2)
+#
+# Fast Direct Generation (AM3 plans):
+# - "DIRECT_AM3_TRANSACTION_BACKEND": Fast transaction profiling with Python platform (AM3)
+# - "DIRECT_AM3_TRANSACTION_UI": Fast transaction profiling with JavaScript platform (AM3)
+# - "DIRECT_AM3_CONTINUOUS_BACKEND": Fast continuous profiling with Python platform (AM3)
+# - "DIRECT_AM3_CONTINUOUS_UI": Fast continuous profiling with JavaScript platform (AM3)
+#
+# Special Modes:
+# - "CUSTOM": Use the custom settings defined below
+# - "DISABLED": Don't use any preset (uses the manual settings below)
+#
+# How to use:
+# 1. Set PRESET to your desired configuration
+# 2. Set MOCK_DURATION_HOURS to control how many hours of data to generate
+# 3. Run the script - it will configure and run based on your preset
+#
+# Plan information:
+# - AM2 plans: Have separate billing for transaction profiling and profile hours
+# - AM3 plans: All profiling billed as profile hours (transactions converted automatically)
+
+PRESET = "DISABLED"  # Choose a preset from the list above or "CUSTOM" or "DISABLED"
+
+# === CUSTOM CONFIGURATION ===
+# These settings are used when PRESET is set to "CUSTOM" or "DISABLED"
+# When using a preset, these settings are overridden by the preset's values
+
+# === PRESET IMPLEMENTATION ===
+# This code applies the settings based on the selected preset
+# It runs before the rest of the script and overrides relevant settings
+
+def apply_preset():
+    global PROFILE_TYPE, PLATFORM, DIRECT_CHUNK_GENERATION, SELECTED_DSN
+    
+    # Don't modify settings if no preset is selected
+    if PRESET == "DISABLED":
+        print(f"No preset selected. Using manual configuration.")
+        return
+        
+    # Set up the preset configurations with their values
+    presets = {
+        # AM2 Plan Presets - Standard Mode
+        "AM2_TRANSACTION_BACKEND": {
+            "profile_type": "transaction",
+            "platform": "python",
+            "direct_generation": False,
+            "dsn": "profile-hours-am2-business", 
+            "description": "Transaction profiling with backend platform (AM2 transaction billing)"
+        },
+        "AM2_TRANSACTION_UI": {
+            "profile_type": "transaction",
+            "platform": "javascript",
+            "direct_generation": False,
+            "dsn": "profile-hours-am2-business",
+            "description": "Transaction profiling with UI platform (AM2 transaction billing)"
+        },
+        "AM2_CONTINUOUS_BACKEND": {
+            "profile_type": "continuous",
+            "platform": "python",
+            "direct_generation": False,
+            "dsn": "profile-hours-am2-business",
+            "description": "Continuous profiling with backend platform (AM2 backend profile hours)"
+        },
+        "AM2_CONTINUOUS_UI": {
+            "profile_type": "continuous",
+            "platform": "javascript",
+            "direct_generation": False,
+            "dsn": "profile-hours-am2-business",
+            "description": "Continuous profiling with UI platform (AM2 UI profile hours)"
+        },
+        
+        # AM3 Plan Presets - Standard Mode
+        "AM3_TRANSACTION_BACKEND": {
+            "profile_type": "transaction",
+            "platform": "python",
+            "direct_generation": False,
+            "dsn": "profile-hours-am3-business",
+            "description": "Transaction profiling converted to backend profile hours (AM3)"
+        },
+        "AM3_TRANSACTION_UI": {
+            "profile_type": "transaction",
+            "platform": "javascript",
+            "direct_generation": False,
+            "dsn": "profile-hours-am3-business",
+            "description": "Transaction profiling converted to UI profile hours (AM3)"
+        },
+        "AM3_CONTINUOUS_BACKEND": {
+            "profile_type": "continuous",
+            "platform": "python",
+            "direct_generation": False,
+            "dsn": "profile-hours-am3-business",
+            "description": "Continuous backend profile hours (AM3)"
+        },
+        "AM3_CONTINUOUS_UI": {
+            "profile_type": "continuous",
+            "platform": "javascript",
+            "direct_generation": False,
+            "dsn": "profile-hours-am3-business",
+            "description": "Continuous UI profile hours (AM3)"
+        },
+        
+        # Direct Generation Presets (Fast mode for AM2)
+        "DIRECT_AM2_TRANSACTION_BACKEND": {
+            "profile_type": "transaction",
+            "platform": "python",
+            "direct_generation": True,
+            "dsn": "profile-hours-am2-business",
+            "description": "Fast direct transaction profiling with backend platform (AM2)"
+        },
+        "DIRECT_AM2_TRANSACTION_UI": {
+            "profile_type": "transaction",
+            "platform": "javascript",
+            "direct_generation": True,
+            "dsn": "profile-hours-am2-business",
+            "description": "Fast direct transaction profiling with UI platform (AM2)"
+        },
+        "DIRECT_AM2_CONTINUOUS_BACKEND": {
+            "profile_type": "continuous",
+            "platform": "python",
+            "direct_generation": True,
+            "dsn": "profile-hours-am2-business",
+            "description": "Fast direct continuous profiling with backend platform (AM2)"
+        },
+        "DIRECT_AM2_CONTINUOUS_UI": {
+            "profile_type": "continuous",
+            "platform": "javascript",
+            "direct_generation": True,
+            "dsn": "profile-hours-am2-business",
+            "description": "Fast direct continuous profiling with UI platform (AM2)"
+        },
+        
+        # Direct Generation Presets (Fast mode for AM3)
+        "DIRECT_AM3_TRANSACTION_BACKEND": {
+            "profile_type": "transaction",
+            "platform": "python",
+            "direct_generation": True,
+            "dsn": "profile-hours-am3-business",
+            "description": "Fast direct transaction profiling with backend platform (AM3)"
+        },
+        "DIRECT_AM3_TRANSACTION_UI": {
+            "profile_type": "transaction",
+            "platform": "javascript",
+            "direct_generation": True,
+            "dsn": "profile-hours-am3-business",
+            "description": "Fast direct transaction profiling with UI platform (AM3)"
+        },
+        "DIRECT_AM3_CONTINUOUS_BACKEND": {
+            "profile_type": "continuous",
+            "platform": "python",
+            "direct_generation": True,
+            "dsn": "profile-hours-am3-business",
+            "description": "Fast direct continuous profiling with backend platform (AM3)"
+        },
+        "DIRECT_AM3_CONTINUOUS_UI": {
+            "profile_type": "continuous",
+            "platform": "javascript",
+            "direct_generation": True,
+            "dsn": "profile-hours-am3-business",
+            "description": "Fast direct continuous profiling with UI platform (AM3)"
+        },
+        
+        # Custom preset - uses the values defined below
+        "CUSTOM": {
+            "profile_type": PROFILE_TYPE,
+            "platform": PLATFORM,
+            "direct_generation": DIRECT_CHUNK_GENERATION,
+            "dsn": SELECTED_DSN,
+            "description": "Custom configuration (using settings defined below)"
+        }
+    }
+    
+    # Check if the preset exists
+    if PRESET not in presets:
+        print(f"WARNING: Unknown preset '{PRESET}'. Using manual configuration.")
+        return
+    
+    # Get the preset configuration
+    preset_config = presets[PRESET]
+    
+    # Apply the preset settings
+    PROFILE_TYPE = preset_config["profile_type"]
+    PLATFORM = preset_config["platform"]
+    DIRECT_CHUNK_GENERATION = preset_config["direct_generation"]
+    SELECTED_DSN = preset_config["dsn"]
+    
+    print(f"Applied preset: {PRESET}")
+    print(f"Description: {preset_config['description']}")
+    print(f"Settings: PROFILE_TYPE={PROFILE_TYPE}, PLATFORM={PLATFORM}, DIRECT_CHUNK_GENERATION={DIRECT_CHUNK_GENERATION}")
+    print(f"DSN: {SELECTED_DSN}")
+
+# Apply the preset now (at import time)
+if PRESET != "DISABLED":
+    apply_preset()
 
 # === PROFILING MODE CONFIGURATION ===
 #
@@ -741,9 +949,12 @@ def profiles_sampler(sampling_context):
 def initialize_sentry():
     """Initialize Sentry SDK with proper configuration based on profile type"""
     
+    # Get the actual DSN value from the selected DSN name
+    dsn_value = AVAILABLE_DSNS.get(SELECTED_DSN, AVAILABLE_DSNS["profile-hours-am3-business"])
+    
     # Common options for both profile types
     init_options = {
-        "dsn": AVAILABLE_DSNS["profile-hours-am3-business"],
+        "dsn": dsn_value,
         "traces_sample_rate": 1.0,  # Capture 100% of transactions
         "debug": DEBUG_PROFILING,  # Use the configured debug setting
         "before_send": before_send,  # Add before_send hook to modify the platform
@@ -771,6 +982,7 @@ def initialize_sentry():
     
     if DEBUG_PROFILING:
         print(f"Initialized Sentry SDK with {PROFILE_TYPE} profiling")
+        print(f"Using DSN: {SELECTED_DSN} ({dsn_value})")
 
 # Initialize Sentry with the proper configuration
 initialize_sentry()
@@ -999,8 +1211,12 @@ def main():
         
         print("=" * 50)
         print("PROFILE HOURS TEST SCRIPT")
+        if PRESET != "DISABLED":
+            print(f"Preset: {PRESET}")
         print(f"Profile type: {PROFILE_TYPE}")
-        print(f"Platform: {PLATFORM}")
+        print(f"Platform: {PLATFORM} {'(UI Platform)' if PLATFORM in UI_PLATFORMS else '(Backend Platform)'}")
+        print(f"DSN: {SELECTED_DSN} ({AVAILABLE_DSNS[SELECTED_DSN]})")
+        print(f"Plan type: {'AM2' if 'am2' in SELECTED_DSN.lower() else 'AM3'}")
         print(f"Mock timestamps: {'Enabled' if MOCK_TIMESTAMPS else 'Disabled'}")
         print(f"Mock duration: {MOCK_DURATION_HOURS} hours")
         print(f"Direct chunk generation: {'Enabled' if DIRECT_CHUNK_GENERATION else 'Disabled'}")
