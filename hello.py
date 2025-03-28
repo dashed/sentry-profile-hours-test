@@ -7,6 +7,13 @@ from sentry_sdk.envelope import Envelope, Item, PayloadRef
 from sentry_sdk.profiler.continuous_profiler import ProfileChunk
 
 # Monkey patch to override platform from "python" to "android" for profiles
+# This is needed to test UI profile hours (PROFILE_DURATION_UI) with the Python SDK
+# The platform value determines how Relay and Sentry categorize profile chunks:
+# 1. In the envelope header: Relay relies on the platform header for classification
+#    - See relay-profiling/src/lib.rs:ProfileChunk::profile_type() method
+# 2. In the profile payload: Sentry checks the platform value within the profile itself
+#    - See sentry/profiles/task.py:get_data_category() and _track_duration_outcome() methods
+# UI platforms are: "cocoa", "android", "javascript"
 from sentry_sdk.profiler.transaction_profiler import Profile
 from sentry_sdk.tracing import Span
 
@@ -29,6 +36,10 @@ def patched_profile_chunk_to_json(self, profiler_id, options, sdk_info):
     result = original_profile_chunk_to_json(self, profiler_id, options, sdk_info)
     if result.get("platform") == "python":
         print(f"DEBUG: Changing ProfileChunk platform from 'python' to 'android'")
+    # Ensure platform is set to "android" in the profile chunk JSON
+    # This is one of the platforms in UI_PROFILE_PLATFORMS in Sentry
+    # See sentry/profiles/task.py:UI_PROFILE_PLATFORMS = {"cocoa", "android", "javascript"}
+    # This ensures proper categorization as PROFILE_DURATION_UI in Relay and Sentry
     result["platform"] = "android"
     return result
 
@@ -44,6 +55,9 @@ def patched_add_profile_chunk(self, profile_chunk):
         )
 
     # Use original method but ensure platform header is "android"
+    # This is critical for UI profile hours (PROFILE_DURATION_UI) in Relay
+    # The platform in the header determines whether a profile chunk is UI or backend
+    # See relay/relay-profiling/src/lib.rs:ProfileChunk::profile_type() method
     print(f"DEBUG: Forcing envelope profile_chunk header platform to 'android'")
     self.add_item(
         Item(
@@ -68,11 +82,11 @@ AVAILABLE_DSNS = {
 
 # Define a before_send hook to modify the platform
 def before_send(event, hint):
-    # Change the platform to whatever you need for testing
-    # See UI_PROFILE_PLATFORMS
-    # https://github.com/getsentry/sentry/blob/c3420bc3a670ba88cb37b9a40ceede748cafdf50/src/sentry/profiles/task.py#L47
-    #
-    # Comment out for profile hours (PROFILE_DURATION)
+    # Change the platform to an appropriate UI platform for testing
+    # UI_PROFILE_PLATFORMS = {"cocoa", "android", "javascript"}
+    # https://github.com/getsentry/sentry/blob/master/src/sentry/profiles/task.py
+    # 
+    # This is critical for profile hours (UI PROFILE_DURATION)
     original_platform = event.get("platform")
     event["platform"] = "android"
     print(
