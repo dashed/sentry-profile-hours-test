@@ -73,7 +73,7 @@ def patched_profile_to_json(self, event_opt, options):
             # Calculate new end time based on mock duration (convert hours to nanoseconds)
             mock_duration_ns = int(MOCK_DURATION_HOURS * 3600 * 1_000_000_000)
             
-            # Set the new end time
+            # Set the new end time - IMPORTANT: This must be a string per SDK expectations
             tx["relative_end_ns"] = str(mock_duration_ns)
             
             if DEBUG_PROFILING:
@@ -82,6 +82,13 @@ def patched_profile_to_json(self, event_opt, options):
             # Add tag to indicate timestamp was mocked
             result["tags"]["mock_duration_hours"] = str(MOCK_DURATION_HOURS)
             result["tags"]["mock_timestamp"] = "true"
+            
+        # Ensure transaction profiles maintain string representation for timestamps
+        # Transaction profiles use string representations of nanosecond offsets
+        if "profile" in result and "samples" in result["profile"]:
+            for sample in result["profile"]["samples"]:
+                if "elapsed_since_start_ns" in sample and not isinstance(sample["elapsed_since_start_ns"], str):
+                    sample["elapsed_since_start_ns"] = str(sample["elapsed_since_start_ns"])
     
     return result
 
@@ -123,6 +130,62 @@ def patched_profile_chunk_to_json(self, profiler_id, options, sdk_info):
         result["tags"] = {}
     result["tags"]["profile_debug"] = "true"
     
+    # CRITICAL FIX: Process profile samples for continuous profiles
+    if PROFILE_TYPE == "continuous" and "profile" in result:
+        if "samples" in result["profile"]:
+            samples = result["profile"]["samples"]
+            
+            if DEBUG_PROFILING:
+                sample_count = len(samples)
+                print(f"DEBUG: Processing {sample_count} samples for Vroom compatibility")
+            
+            # 1. Ensure all timestamps are proper floats
+            for sample in samples:
+                if "timestamp" in sample:
+                    if not isinstance(sample["timestamp"], float):
+                        sample["timestamp"] = float(sample["timestamp"])
+            
+            # 2. Sort samples by timestamp (required by Vroom)
+            samples.sort(key=lambda s: s["timestamp"])
+            
+            # 3. Check duration and trim if necessary to stay under the 66-second limit
+            if len(samples) >= 2:
+                first_ts = samples[0]["timestamp"]
+                last_ts = samples[-1]["timestamp"]
+                duration = last_ts - first_ts
+                
+                if DEBUG_PROFILING:
+                    print(f"DEBUG: Final chunk duration is {duration:.2f} seconds")
+                
+                # If duration exceeds safe limit, trim samples to fit
+                if duration > 60:  # 60 seconds is safe (below the 66-second limit)
+                    # Calculate required reduction
+                    reduction_factor = 60 / duration
+                    target_count = max(2, int(len(samples) * reduction_factor))
+                    
+                    # Select evenly distributed samples
+                    if target_count < len(samples):
+                        step = len(samples) / target_count
+                        new_samples = [samples[min(int(i * step), len(samples) - 1)] 
+                                      for i in range(target_count)]
+                        
+                        # Update the samples list
+                        result["profile"]["samples"] = new_samples
+                        
+                        if DEBUG_PROFILING:
+                            print(f"DEBUG: Trimmed samples from {len(samples)} to {len(new_samples)} "
+                                  f"to reduce duration from {duration:.2f}s to under 60s")
+                
+                # Verify final duration
+                if len(result["profile"]["samples"]) >= 2:
+                    first_ts = result["profile"]["samples"][0]["timestamp"]
+                    last_ts = result["profile"]["samples"][-1]["timestamp"]
+                    final_duration = last_ts - first_ts
+                    
+                    if DEBUG_PROFILING:
+                        print(f"DEBUG: Final chunk contains {len(result['profile']['samples'])} samples "
+                              f"spanning {final_duration:.2f} seconds")
+    
     return result
 
 
@@ -155,12 +218,13 @@ def patched_profile_buffer_init(self, options, sdk_info, buffer_size, capture_fu
     original_profile_buffer_init(self, options, sdk_info, buffer_size, capture_func)
     
     # Store the original timestamp for later reference
-    self.original_start_timestamp = self.start_timestamp
+    # CRITICAL FIX: Ensure timestamp is a proper float (seconds since epoch)
+    self.original_start_timestamp = float(self.start_timestamp)
     
     if MOCK_TIMESTAMPS and PROFILE_TYPE == "continuous":
         # Log the override if debugging is enabled
         if DEBUG_PROFILING:
-            print(f"DEBUG: Initializing ProfileBuffer with mock timestamps (duration: {MOCK_DURATION_HOURS} hours)")
+            print(f"DEBUG: Initializing ProfileBuffer with mock timestamps (duration: {MOCK_DURATION_HOURS} hours, start: {self.original_start_timestamp})")
 
 def patched_profile_buffer_write(self, monotonic_time, sample):
     """Override buffer write to modify timestamps for mocking lengthy profiles"""
@@ -168,33 +232,56 @@ def patched_profile_buffer_write(self, monotonic_time, sample):
     if not MOCK_TIMESTAMPS or PROFILE_TYPE != "continuous":
         return original_profile_buffer_write(self, monotonic_time, sample)
     
-    # When mocking timestamps for continuous profiles, we need to:
-    # 1. Calculate the elapsed time since buffer start as a fraction of total buffer time
-    # 2. Scale this fraction to our mock duration
-    # 3. Add this scaled time to our original start timestamp
+    # CRITICAL FIX: Vroom has a MAX_PROFILE_CHUNK_DURATION of 66 seconds
+    # We must create chunks that stay under this limit
+    # Strategy: Pretend each buffer collects 60 seconds of data, distributed across the hour
     
     # Calculate how far we are into the buffer (as a fraction)
     elapsed_fraction = (monotonic_time - self.start_monotonic_time) / self.buffer_size
     
     # Don't flush yet, we'll manually flush at specific intervals for mocking
     if elapsed_fraction < 1.0:
-        # Scale the elapsed time to our mock duration (in seconds)
-        mock_elapsed_secs = elapsed_fraction * (MOCK_DURATION_HOURS * 3600)
+        # Generate a buffer-wide timestamp offset that stays within vroom limits
+        # Current buffer will represent a 60-second window somewhere within the mocked duration
         
-        # Calculate the mocked absolute timestamp by adding to the original start
-        mocked_timestamp = self.original_start_timestamp + mock_elapsed_secs
+        # Initialize chunk counter if not present
+        if not hasattr(self, 'mock_chunk_counter'):
+            self.mock_chunk_counter = 0
         
-        # Use the mocked timestamp to write the sample
-        self.chunk.write(mocked_timestamp, sample)
+        # Calculate which 60-second window this chunk represents
+        hours_in_seconds = MOCK_DURATION_HOURS * 3600
+        max_windows = max(1, int(hours_in_seconds / 60))
+        
+        # Use the counter to determine which 60-second window we're in
+        window_index = self.mock_chunk_counter % max_windows
+        window_start_time = window_index * 60
+        
+        # Calculate a timestamp within the 60-second window
+        in_window_offset = elapsed_fraction * 60  # 0-60 second offset within window
+        mock_elapsed_secs = window_start_time + in_window_offset
+        
+        # Calculate the absolute timestamp
+        base_timestamp = float(self.original_start_timestamp)
+        mocked_timestamp = base_timestamp + float(mock_elapsed_secs)
+        
+        # Write the sample with the properly mocked timestamp
+        original_profile_chunk_write(self.chunk, mocked_timestamp, sample)
         
         if DEBUG_PROFILING and random.random() < 0.01:  # Only log occasionally to avoid spam
-            print(f"DEBUG: Writing sample at mocked timestamp +{mock_elapsed_secs:.2f}s")
+            print(f"DEBUG: Writing sample at window {window_index+1}/{max_windows}, "
+                  f"offset +{in_window_offset:.2f}s, absolute: {mocked_timestamp:.3f}")
     else:
-        # Time to flush the buffer
+        # Time to flush the buffer and increment counter
         if hasattr(self, 'mock_flush_count'):
             self.mock_flush_count += 1
         else:
             self.mock_flush_count = 1
+            
+        # Increment the window counter for next chunk
+        if hasattr(self, 'mock_chunk_counter'):
+            self.mock_chunk_counter += 1
+        else:
+            self.mock_chunk_counter = 1
             
         # Reset the buffer
         self.flush()
@@ -202,7 +289,7 @@ def patched_profile_buffer_write(self, monotonic_time, sample):
         self.start_monotonic_time = now()
         
         if DEBUG_PROFILING:
-            print(f"DEBUG: Flushed mock profile chunk {self.mock_flush_count} after simulating {MOCK_DURATION_HOURS} hours")
+            print(f"DEBUG: Flushed profile chunk {self.mock_flush_count}, moving to window {self.mock_chunk_counter}")
 
 def patched_profile_chunk_write(self, ts, sample):
     """Override ProfileChunk.write to add additional mock samples if needed"""
@@ -218,50 +305,56 @@ def patched_profile_chunk_write(self, ts, sample):
         # Get the last real sample as a template
         last_sample = self.samples[-1]
         
-        # Regularly add a few additional samples (10% chance per real sample)
-        if random.random() < 0.1:
-            # Add a few samples with slightly different timestamps
-            for i in range(random.randint(1, 3)):
-                # Clone the sample
-                new_sample = dict(last_sample)
+        # CRITICAL FIX: Ensure we don't exceed MAX_PROFILE_CHUNK_DURATION (66 seconds)
+        # Add a few more samples within a narrow time window (< 5 seconds from last)
+        if random.random() < 0.15:  # 15% chance per sample
+            # Add 1-2 samples with slightly different timestamps
+            for i in range(random.randint(1, 2)):
+                # Clone the sample with the minimal required structure
+                new_sample = {
+                    "timestamp": 0.0,  # Will be set below
+                    "thread_id": last_sample["thread_id"],
+                    "stack_id": last_sample["stack_id"]
+                }
                 
-                # Adjust the timestamp slightly - add between 0.01-0.5 seconds
-                if "timestamp" in new_sample:
-                    time_offset = random.uniform(0.01, 0.5)
-                    new_sample["timestamp"] = last_sample["timestamp"] + time_offset
-                    
-                    # Add to samples list
-                    self.samples.append(new_sample)
-                    
-                    if DEBUG_PROFILING and random.random() < 0.01:
-                        print(f"DEBUG: Added mock sample at ts+{time_offset:.3f}s")
-        
-        # Occasionally (1% chance) add a batch of samples spread throughout the mocked duration
-        # This helps create a distribution of samples across the entire mocked time period
-        if random.random() < 0.01 and "timestamp" in last_sample:
-            base_timestamp = last_sample["timestamp"]
-            hours_in_seconds = MOCK_DURATION_HOURS * 3600
-            
-            # How many fake samples to add across the time period (more for longer durations)
-            num_samples = min(50, int(MOCK_DURATION_HOURS * 10))
-            
-            if DEBUG_PROFILING:
-                print(f"DEBUG: Adding batch of {num_samples} samples spread across {MOCK_DURATION_HOURS} hours")
-            
-            # Add samples spread across the full time period
-            for i in range(num_samples):
-                # Clone the sample
-                new_sample = dict(last_sample)
+                # Keep timestamps close (0.1-3 seconds) to avoid exceeding max duration
+                time_offset = random.uniform(0.1, 3.0)
+                new_timestamp = float(last_sample["timestamp"]) + time_offset
                 
-                # Calculate a timestamp somewhere within the mocked duration
-                time_offset = random.uniform(0, hours_in_seconds)
-                new_sample["timestamp"] = base_timestamp + time_offset
+                # Ensure timestamp is a proper float
+                new_sample["timestamp"] = new_timestamp
                 
                 # Add to samples list
                 self.samples.append(new_sample)
                 
+                if DEBUG_PROFILING and random.random() < 0.05:
+                    print(f"DEBUG: Added mock sample at timestamp {new_timestamp:.3f} (+{time_offset:.2f}s offset)")
+        
+        # Occasionally (1.5% chance) check and sort samples by timestamp
+        # This ensures timestamps are monotonically increasing, which Vroom expects
+        if random.random() < 0.015:
             if DEBUG_PROFILING:
-                print(f"DEBUG: Added {num_samples} samples across {MOCK_DURATION_HOURS} hours")
+                print(f"DEBUG: Sorting {len(self.samples)} samples by timestamp")
+                
+            # Sort samples by timestamp to ensure proper ordering
+            self.samples.sort(key=lambda s: s["timestamp"])
+            
+            # Check that sample spread doesn't exceed max duration (66 seconds)
+            if len(self.samples) >= 2:
+                first_ts = float(self.samples[0]["timestamp"])
+                last_ts = float(self.samples[-1]["timestamp"])
+                duration = last_ts - first_ts
+                
+                if DEBUG_PROFILING:
+                    print(f"DEBUG: Current chunk spans {duration:.2f} seconds")
+                
+                # If we're close to the limit, trim some older samples
+                if duration > 60:  # Leave some margin below the 66-second limit
+                    cutoff_index = len(self.samples) // 3  # Remove oldest third
+                    if cutoff_index > 0:
+                        self.samples = self.samples[cutoff_index:]
+                        if DEBUG_PROFILING:
+                            print(f"DEBUG: Trimmed oldest {cutoff_index} samples to stay within duration limits")
 
 # Patch Profile.valid to bypass the minimum samples check
 def patched_profile_valid(self):
@@ -346,11 +439,16 @@ def patched_profile_write(self, ts, sample):
             for _ in range(random.randint(1, 3)):
                 # Use a new timestamp that's slightly offset from the original
                 mock_ts = ts + random.randint(1000000, 10000000)  # 1-10ms offset
+                
+                # CRITICAL FIX: Ensure mock_ts is an integer for transaction profiles
+                if not isinstance(mock_ts, int):
+                    mock_ts = int(mock_ts)
+                
                 # Call original write with new timestamp and same sample
                 original_profile_write(self, mock_ts, sample)
                 
                 if DEBUG_PROFILING and random.random() < 0.01:
-                    print(f"DEBUG: Added mock sample to transaction profile (now {self.unique_samples} samples)")
+                    print(f"DEBUG: Added mock sample to transaction profile at offset +{(mock_ts-ts)/1000000:.2f}ms (now {self.unique_samples} samples)")
 
 # Apply all the patches
 Profile.to_json = patched_profile_to_json

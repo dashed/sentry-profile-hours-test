@@ -93,6 +93,56 @@ The platform determination is critical for profile classification. UI profiles (
    - Metadata is stored in databases for querying
    - Used for visualization and analysis in the Sentry UI
 
+### Timestamp Validation in Vroom
+
+Vroom enforces strict validation on profile timestamps that must be considered when mocking lengthy profiles:
+
+1. **Maximum Duration Limit:**
+   - `MAX_PROFILE_CHUNK_DURATION = 66 seconds` - defined in `relay-profiling/src/lib.rs`
+   - Any profile chunk with samples spanning more than 66 seconds will be rejected
+   - This is slightly higher than the standard 60-second chunk size to account for high CPU load scenarios
+
+2. **Timestamp Format:**
+   - Continuous profile timestamps must be valid Unix timestamps (seconds since epoch)
+   - They must be floating-point numbers with millisecond precision
+   - Example: `1710805788.500`
+
+3. **Timestamp Ordering:**
+   - Samples are sorted by timestamp during processing
+   - Timestamps must be monotonically increasing 
+   - Widely varying timestamps in a single chunk will cause validation failures
+
+4. **Validation Process:**
+   ```rust
+   fn is_above_max_duration(&self) -> bool {
+       if self.samples.is_empty() {
+           return false;
+       }
+       let mut min = self.samples[0].timestamp;
+       let mut max = self.samples[0].timestamp;
+       
+       for sample in self.samples.iter().skip(1) {
+           if sample.timestamp < min {
+               min = sample.timestamp
+           } else if sample.timestamp > max {
+               max = sample.timestamp
+           }
+       }
+       
+       let duration = max.saturating_sub(min);
+       duration.to_f64() > MAX_PROFILE_CHUNK_DURATION_SECS
+   }
+   ```
+
+5. **Sample Structure:**
+   ```json
+   {
+     "timestamp": 1710805788.500,
+     "thread_id": "main",
+     "stack_id": 0
+   }
+   ```
+
 ### Relevance to Profile Hours Testing
 
 When testing UI profile hours with the Python SDK:
@@ -103,6 +153,25 @@ When testing UI profile hours with the Python SDK:
 4. The profile contributes to UI profile hours in Sentry's billing system
 
 Understanding this flow is important because it explains why platform spoofing needs to happen at multiple levels in the SDK to ensure proper categorization throughout the entire pipeline.
+
+### Strategies for Mocking Lengthy Profiles
+
+To effectively mock lengthy profiles while respecting Vroom's validation:
+
+1. **Window-Based Approach:**
+   - Divide the mocked duration (e.g., 1 hour) into multiple 60-second windows
+   - Each profile chunk represents one 60-second window
+   - Rotate through windows as the profiler flushes chunks
+
+2. **Timestamp Management:**
+   - Ensure timestamps within each chunk span less than 66 seconds
+   - Maintain proper floating-point format for timestamps
+   - Sort samples chronologically within each chunk
+   - Trim samples when necessary to maintain valid duration
+
+3. **Consistent Types:**
+   - Continuous profiles: Use floating-point Unix timestamps
+   - Transaction profiles: Use string-represented nanosecond offsets from start
 
 ## Sentry Python SDK Blueprint
 
