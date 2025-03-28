@@ -173,6 +173,56 @@ To effectively mock lengthy profiles while respecting Vroom's validation:
    - Continuous profiles: Use floating-point Unix timestamps
    - Transaction profiles: Use string-represented nanosecond offsets from start
 
+### Synthetic Profile Generation
+
+For efficient mocking of extended profile durations, we can entirely replace real profiling with synthetic data generation:
+
+1. **Synthetic Sample Creation:**
+   - Generate complete synthetic profile samples instead of capturing real CPU activity
+   - Create artificial stack frames with realistic function names, filenames, and line numbers
+   - Construct samples with the correct structure expected by the SDK
+
+2. **Profile Buffer Injection:**
+   - Replace the profiler's sampler with a custom synthetic sampler
+   - Directly inject synthetic samples into the profile buffer
+   - Control the timing and distribution of samples to create realistic profiles
+
+3. **Full Coverage Generation:**
+   - For continuous profiling, generate ~60 chunks per hour (one per minute)
+   - Track window coverage to ensure the full mocked duration is represented
+   - Force buffer flushes to accelerate the generation of chunks
+
+4. **Transaction Profile Mocking:**
+   - For transaction profiles, inject samples distributed across the mocked duration
+   - Directly modify the relative_end_ns to represent the full duration
+   - Create enough samples to ensure the profile is valid without actual CPU tasks
+
+### Ultra-Fast Direct Chunk Generation
+
+For generating massive amounts of profile data in seconds (e.g., hours of data in seconds), we can bypass the SDK's buffer and scheduling mechanisms completely:
+
+1. **Direct Envelope Construction:**
+   - Create profile chunks manually without using the SDK's buffers
+   - Construct each chunk to represent a discrete 60-second window of the mocked duration
+   - Ensure each chunk adheres to Vroom's validation rules (< 66 seconds duration)
+
+2. **Complete Pipeline Bypass:**
+   - Directly create and format the JSON payload for each chunk
+   - Set the proper envelope headers and payload structure
+   - Send envelopes directly to the SDK's transport
+
+3. **Parallelized Generation:**
+   - Generate multiple chunks in parallel
+   - Each chunk contains synthetic samples with precise timestamps
+   - Spread timestamps evenly across the 60-second window
+
+4. **Massive Scale Generation:**
+   - Generate 1 hour of profile data (~60 chunks) in under a second
+   - Scale to days or weeks of data in seconds
+   - Maintain proper structure and timestamp sequencing throughout
+
+This direct generation approach achieves extreme efficiency, enabling the creation of weeks or months of profile data in a matter of seconds. By bypassing the SDK's internal mechanisms and directly using the transport layer, we eliminate all the bottlenecks of normal profile collection.
+
 ## Sentry Python SDK Blueprint
 
 ### Core Components

@@ -8,12 +8,18 @@ MOCK_TIMESTAMPS = True  # Set to True to mock longer profiles without actually r
 MOCK_DURATION_HOURS = 1.0  # How many hours to simulate for each profile session
 MOCK_SAMPLES_PER_HOUR = 3600  # How many samples per hour to generate (if mocking)
 
+# Direct chunk generation (ultra-fast mode)
+DIRECT_CHUNK_GENERATION = True  # Set to True to generate chunks directly (bypasses profiler)
+SAMPLES_PER_CHUNK = 20  # How many samples to include in each chunk for direct generation
+
 # Debug and sampling options
 DEBUG_PROFILING = True  # Set to True for verbose debugging info
 MINIMUM_SAMPLES = 3  # Minimum number of samples to ensure are collected
 
 # ----------------------- IMPLEMENTATION -----------------------
 import random
+import sys
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -222,9 +228,20 @@ def patched_profile_buffer_init(self, options, sdk_info, buffer_size, capture_fu
     self.original_start_timestamp = float(self.start_timestamp)
     
     if MOCK_TIMESTAMPS and PROFILE_TYPE == "continuous":
+        # Initialize tracking for window coverage
+        self.mock_chunk_counter = 0
+        self.mock_flush_count = 0
+        self.covered_windows = set()
+        self.total_windows = max(1, int(MOCK_DURATION_HOURS * 3600 / 60))
+        self.last_coverage_report = 0
+        
+        # Set to track which chunks we've generated
+        self.generated_chunks = {}  # window_index -> count
+        
         # Log the override if debugging is enabled
         if DEBUG_PROFILING:
-            print(f"DEBUG: Initializing ProfileBuffer with mock timestamps (duration: {MOCK_DURATION_HOURS} hours, start: {self.original_start_timestamp})")
+            print(f"DEBUG: Initializing ProfileBuffer with mock timestamps for {MOCK_DURATION_HOURS} hours")
+            print(f"DEBUG: Will generate approximately {self.total_windows} chunks to cover the full duration")
 
 def patched_profile_buffer_write(self, monotonic_time, sample):
     """Override buffer write to modify timestamps for mocking lengthy profiles"""
@@ -242,21 +259,35 @@ def patched_profile_buffer_write(self, monotonic_time, sample):
     # Don't flush yet, we'll manually flush at specific intervals for mocking
     if elapsed_fraction < 1.0:
         # Generate a buffer-wide timestamp offset that stays within vroom limits
-        # Current buffer will represent a 60-second window somewhere within the mocked duration
-        
-        # Initialize chunk counter if not present
-        if not hasattr(self, 'mock_chunk_counter'):
-            self.mock_chunk_counter = 0
-        
         # Calculate which 60-second window this chunk represents
         hours_in_seconds = MOCK_DURATION_HOURS * 3600
-        max_windows = max(1, int(hours_in_seconds / 60))
         
-        # Use the counter to determine which 60-second window we're in
-        window_index = self.mock_chunk_counter % max_windows
+        # IMPORTANT: We need to prioritize uncovered windows to ensure full coverage
+        if len(self.covered_windows) < self.total_windows and self.mock_chunk_counter >= self.total_windows:
+            # If we've gone through all windows once but still have uncovered windows,
+            # find an uncovered window to use next
+            uncovered = set(range(self.total_windows)) - self.covered_windows
+            if uncovered:
+                # Prioritize uncovered windows
+                window_index = random.choice(list(uncovered))
+            else:
+                # Default sequential approach if all are covered (shouldn't happen)
+                window_index = self.mock_chunk_counter % self.total_windows
+        else:
+            # Normal sequential approach for initial coverage
+            window_index = self.mock_chunk_counter % self.total_windows
+            
+        # Mark this window as covered
+        self.covered_windows.add(window_index)
+        
+        # Track which chunks we've generated for each window
+        if window_index in self.generated_chunks:
+            self.generated_chunks[window_index] += 1
+        else:
+            self.generated_chunks[window_index] = 1
+        
+        # Calculate timestamp within the window
         window_start_time = window_index * 60
-        
-        # Calculate a timestamp within the 60-second window
         in_window_offset = elapsed_fraction * 60  # 0-60 second offset within window
         mock_elapsed_secs = window_start_time + in_window_offset
         
@@ -267,29 +298,47 @@ def patched_profile_buffer_write(self, monotonic_time, sample):
         # Write the sample with the properly mocked timestamp
         original_profile_chunk_write(self.chunk, mocked_timestamp, sample)
         
-        if DEBUG_PROFILING and random.random() < 0.01:  # Only log occasionally to avoid spam
-            print(f"DEBUG: Writing sample at window {window_index+1}/{max_windows}, "
-                  f"offset +{in_window_offset:.2f}s, absolute: {mocked_timestamp:.3f}")
+        # Log detailed info occasionally to avoid spam
+        if DEBUG_PROFILING and random.random() < 0.005:
+            coverage_percent = (len(self.covered_windows) / self.total_windows) * 100
+            print(f"DEBUG: Writing sample at window {window_index+1}/{self.total_windows} "
+                  f"({coverage_percent:.1f}% coverage), offset +{in_window_offset:.2f}s")
     else:
         # Time to flush the buffer and increment counter
-        if hasattr(self, 'mock_flush_count'):
-            self.mock_flush_count += 1
-        else:
-            self.mock_flush_count = 1
-            
-        # Increment the window counter for next chunk
-        if hasattr(self, 'mock_chunk_counter'):
-            self.mock_chunk_counter += 1
-        else:
-            self.mock_chunk_counter = 1
-            
+        self.mock_flush_count += 1
+        
+        # Increment window counter for next chunk
+        self.mock_chunk_counter += 1
+        
         # Reset the buffer
         self.flush()
         self.chunk = ProfileChunk()
         self.start_monotonic_time = now()
         
-        if DEBUG_PROFILING:
-            print(f"DEBUG: Flushed profile chunk {self.mock_flush_count}, moving to window {self.mock_chunk_counter}")
+        # Report coverage progress at regular intervals
+        current_time = time.time()
+        if DEBUG_PROFILING and (current_time - getattr(self, 'last_coverage_report', 0) > 5):
+            self.last_coverage_report = current_time
+            coverage_percent = (len(self.covered_windows) / self.total_windows) * 100
+            print(f"DEBUG: Flushed chunk {self.mock_flush_count}, window coverage: "
+                  f"{len(self.covered_windows)}/{self.total_windows} ({coverage_percent:.1f}%)")
+            
+            # If we've generated a significant number of chunks but still have uncovered windows,
+            # print which ones are missing
+            if self.mock_flush_count > self.total_windows * 0.5 and len(self.covered_windows) < self.total_windows:
+                uncovered = set(range(self.total_windows)) - self.covered_windows
+                if len(uncovered) < 20:
+                    print(f"DEBUG: Uncovered windows: {sorted(uncovered)}")
+                else:
+                    print(f"DEBUG: {len(uncovered)} windows still uncovered")
+                    
+        # Force another flush immediately if we need more coverage
+        # This accelerates coverage of all time windows
+        if self.mock_flush_count % 5 == 0 and len(self.covered_windows) < self.total_windows:
+            if DEBUG_PROFILING:
+                print(f"DEBUG: Accelerating window coverage ({len(self.covered_windows)}/{self.total_windows})")
+            # Force immediate start of a new buffer to continue coverage
+            self.start_monotonic_time = now() - self.buffer_size * 0.9
 
 def patched_profile_chunk_write(self, ts, sample):
     """Override ProfileChunk.write to add additional mock samples if needed"""
@@ -578,14 +627,26 @@ def create_test_transaction():
         capture_message("This is a test message within transaction")
 
 
-# Example function to profile
+# Tasks for profiling
 def cpu_intensive_task(duration_ms=500):
     """
     CPU intensive task that should generate multiple profile samples.
+    If MOCK_TIMESTAMPS is True, this will just sleep instead of actually
+    burning CPU cycles, since we'll be generating synthetic profile data.
     
     Args:
         duration_ms: Minimum duration in milliseconds to run the task
     """
+    # If we're mocking timestamps, we don't need to actually burn CPU
+    # Just sleep a bit to allow the mocking code to run
+    if MOCK_TIMESTAMPS:
+        sleep_duration = min(duration_ms / 1000, 0.1)  # Sleep for at most 0.1s
+        time.sleep(sleep_duration)
+        if DEBUG_PROFILING:
+            print(f"DEBUG: Skipped CPU task (mocking enabled) - slept for {sleep_duration:.2f}s")
+        return 0
+    
+    # Standard CPU-intensive task for real profiling
     result = 0
     start_time = time.time()
     iteration = 0
@@ -608,6 +669,56 @@ def cpu_intensive_task(duration_ms=500):
     elapsed_ms = (time.time() - start_time) * 1000
     print(f"DEBUG: CPU task completed after {elapsed_ms:.1f}ms, {iteration} iterations")
     return result
+
+
+def generate_synthetic_profile_sample():
+    """
+    Generate a completely synthetic profile sample for use when MOCK_TIMESTAMPS is True.
+    This eliminates the need for actual CPU-intensive tasks.
+    """
+    # Create a basic synthetic stack (similar to what extract_stack would produce)
+    frame_functions = [
+        "main",
+        "run_app",
+        "process_request",
+        "handle_data",
+        "calculate_result",
+        "compute_value",
+        "update_cache",
+        "format_response",
+        "send_result"
+    ]
+    
+    # Randomly select 3-7 functions to create a stack trace
+    stack_depth = random.randint(3, 7)
+    selected_functions = random.sample(frame_functions, stack_depth)
+    
+    # Create frame representations
+    frames = []
+    frame_ids = []
+    
+    # Create a unique ID for this stack
+    stack_id = str(uuid.uuid4())[:8]
+    
+    # Create synthetic frames
+    for i, func_name in enumerate(selected_functions):
+        # Create a synthetic frame with typical attributes
+        frame = {
+            "function": func_name,
+            "filename": f"/app/src/{func_name.lower().replace('_', '/')}.py",
+            "lineno": random.randint(10, 500),
+            "module": f"app.{func_name.lower().replace('_', '.')}",
+            "abs_path": f"/app/src/{func_name.lower().replace('_', '/')}.py",
+            "in_app": True
+        }
+        frames.append(frame)
+        frame_ids.append(f"frame_{i}_{func_name}")
+    
+    # Create a synthetic sample with current thread ID and the generated stack
+    thread_id = str(threading.get_ident())
+    sample = [(thread_id, (stack_id, frame_ids, frames))]
+    
+    return sample
 
 
 # Start the profiler
@@ -725,17 +836,153 @@ def main():
         print(f"Mock timestamps: {'Enabled' if MOCK_TIMESTAMPS else 'Disabled'}")
         if MOCK_TIMESTAMPS:
             print(f"Mock duration: {MOCK_DURATION_HOURS} hours")
+            print(f"Direct chunk generation: {'Enabled' if DIRECT_CHUNK_GENERATION else 'Disabled'}")
         print("=" * 50)
         
-        while True:  # Infinite loop
-            run_iteration()
-            
-            # Delay between iterations
-            print("\nWaiting 5 seconds before next iteration...\n")
-            time.sleep(5)
+        # Use direct chunk generation if configured
+        if MOCK_TIMESTAMPS and DIRECT_CHUNK_GENERATION:
+            print("\nDirect chunk generation mode enabled")
+            print("This will generate hours of profile data in seconds")
+            generate_direct_profile_chunks()
+        else:
+            while True:  # Infinite loop
+                run_iteration()
+                
+                # Delay between iterations
+                print("\nWaiting 5 seconds before next iteration...\n")
+                time.sleep(5)
 
     except KeyboardInterrupt:
         print("\nShutting down gracefully...")
+
+def generate_direct_profile_chunks():
+    """
+    Generate and send profile chunks directly without using the SDK's buffer.
+    This allows generating hours worth of profile data in seconds.
+    """
+    print(f"\nGenerating {MOCK_DURATION_HOURS} hours of profile chunks directly")
+    
+    # Calculate how many chunks to generate (approximately 60 per hour)
+    hours_in_seconds = MOCK_DURATION_HOURS * 3600
+    chunks_to_generate = max(1, int(hours_in_seconds / 60))
+    
+    print(f"Will generate {chunks_to_generate} profile chunks with {SAMPLES_PER_CHUNK} samples each")
+    
+    # Generate a profiler_id - this would normally be created by the SDK
+    profiler_id = uuid.uuid4().hex
+    
+    # Get the client and its options
+    client = sentry_sdk.get_client()
+    if not client or not client.options:
+        print("ERROR: Could not access Sentry client or options")
+        return
+    
+    # Get the SDK info
+    sdk_info = {"name": "sentry.python", "version": "2.24.1"}  # Hardcoded version
+    
+    # Get the capture function - this is what actually sends the envelope to Sentry
+    capture_func = None
+    if hasattr(client, 'transport') and client.transport:
+        if hasattr(client.transport, 'capture_envelope'):
+            capture_func = client.transport.capture_envelope
+    
+    if not capture_func:
+        print("ERROR: Could not access capture_envelope function")
+        return
+    
+    # Set up progress tracking
+    start_time = time.time()
+    last_report_time = start_time
+    chunks_generated = 0
+    
+    print("\nGenerating and sending chunks...")
+    
+    # Timestamp base - start from current time
+    base_timestamp = datetime.now(timezone.utc).timestamp()
+    
+    # Generate chunks for the entire duration
+    for window_index in range(chunks_to_generate):
+        # Create a new profile chunk
+        chunk = ProfileChunk()
+        
+        # Calculate the timestamp for this window (each window is 60 seconds)
+        window_timestamp = base_timestamp + (window_index * 60)
+        
+        # Generate samples for this chunk
+        for i in range(SAMPLES_PER_CHUNK):
+            # Create a synthetic sample
+            sample = generate_synthetic_profile_sample()[0]
+            
+            # Calculate offset within this 60-second window (0-59 seconds)
+            # This ensures samples are within a 60-second window to avoid Vroom's validation
+            in_window_offset = (i / SAMPLES_PER_CHUNK) * 59  # Spread across 59 seconds
+            sample_timestamp = window_timestamp + in_window_offset
+            
+            # Write the sample to the chunk
+            original_profile_chunk_write(chunk, sample_timestamp, [sample])
+        
+        # Convert the chunk to JSON
+        chunk_data = chunk.to_json(profiler_id, client.options, sdk_info)
+        
+        # Override platform to match the configuration
+        chunk_data["platform"] = PLATFORM
+        
+        # Add debugging info
+        chunk_data["debug_info"] = {
+            "original_platform": "python",
+            "spoofed_platform": PLATFORM,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "test_id": str(uuid.uuid4())[:8],
+            "mock_timestamp": "true",
+            "mock_duration_hours": str(MOCK_DURATION_HOURS),
+            "window_index": window_index,
+            "direct_generation": "true"
+        }
+        
+        # Create an envelope and add the profile chunk
+        envelope = Envelope()
+        envelope.add_item(
+            Item(
+                payload=PayloadRef(json=chunk_data),
+                type="profile_chunk",
+                headers={"platform": PLATFORM},  # Critical for UI profile hours
+            )
+        )
+        
+        # Send the envelope directly
+        capture_func(envelope)
+        
+        # Update tracking
+        chunks_generated += 1
+        
+        # Report progress periodically
+        current_time = time.time()
+        if (current_time - last_report_time) >= 0.5 or chunks_generated == chunks_to_generate:
+            last_report_time = current_time
+            elapsed = current_time - start_time
+            progress = (chunks_generated / chunks_to_generate) * 100
+            time_covered = (chunks_generated * 60) / 3600  # Hours of profile data
+            
+            # Estimate completion time
+            if chunks_generated > 0 and elapsed > 0:
+                chunks_per_second = chunks_generated / elapsed
+                remaining_chunks = chunks_to_generate - chunks_generated
+                estimated_remaining_seconds = remaining_chunks / chunks_per_second if chunks_per_second > 0 else 0
+                
+                print(f"Progress: {chunks_generated}/{chunks_to_generate} chunks "
+                      f"({progress:.1f}%, {time_covered:.2f} hours covered), "
+                      f"Rate: {chunks_per_second:.1f} chunks/s, "
+                      f"ETA: {estimated_remaining_seconds:.1f}s")
+    
+    # Final report
+    total_time = time.time() - start_time
+    print(f"\nGeneration complete: {chunks_generated} chunks ({MOCK_DURATION_HOURS} hours) "
+          f"generated in {total_time:.2f} seconds")
+    print(f"Generation speed: {chunks_generated / total_time:.1f} chunks/second "
+          f"({MOCK_DURATION_HOURS / total_time:.2f} hours/second)")
+    
+    # Offer to run more if needed
+    print(f"\nTip: To generate more data, increase MOCK_DURATION_HOURS at the top of the script.")
         
 def run_iteration():
     """Run a single test iteration with the configured profile type"""
@@ -748,7 +995,139 @@ def run_continuous_profile_test():
     """Run a test with continuous profiling"""
     print("\nStarting continuous profile test...")
     
-    # Start the profiler for continuous profiling
+    # For MOCK_TIMESTAMPS mode, we can directly inject synthetic profile data
+    if MOCK_TIMESTAMPS:
+        hours_in_seconds = MOCK_DURATION_HOURS * 3600
+        expected_chunks = max(1, int(hours_in_seconds / 60))
+        
+        print(f"Mock timestamps enabled: Will generate {expected_chunks} synthetic profile chunks")
+        print(f"This will simulate {MOCK_DURATION_HOURS} hours of profiling data")
+        
+        # Get direct access to the scheduler and buffer
+        original_sampler = None
+        scheduler = None
+        buffer = None
+        client = sentry_sdk.get_client()
+        
+        # Start the profiler to initialize the buffer and scheduler
+        sentry_sdk.profiler.start_profiler()
+        
+        # Access the scheduler
+        if hasattr(client, '_profiler') and client._profiler:
+            scheduler = getattr(client._profiler, '_scheduler', None)
+            
+            # Get the buffer
+            if scheduler and hasattr(scheduler, 'buffer'):
+                buffer = scheduler.buffer
+                
+                # Save the original sampler for restoration later
+                if hasattr(scheduler, 'sampler'):
+                    original_sampler = scheduler.sampler
+        
+        if not buffer or not scheduler:
+            print("ERROR: Could not access profiler buffer or scheduler. Falling back to standard profiling.")
+            return run_standard_profiling()
+        
+        # Create a custom sampler that injects synthetic samples
+        def synthetic_sampler(*args, **kwargs):
+            # Generate a synthetic sample
+            return generate_synthetic_profile_sample()
+        
+        # Replace the scheduler's sampler with our synthetic one
+        scheduler.sampler = synthetic_sampler
+        
+        print("\nGenerating synthetic profile chunks...")
+        
+        # Create initial transactions to set up the profiling context
+        with sentry_sdk.start_transaction(name="setup-transaction") as transaction:
+            transaction.set_tag("ui_profile_test", "true") 
+            transaction.set_tag("profile_type", "continuous")
+            transaction.set_tag("synthetic_data", "true")
+            transaction.set_tag("mock_duration_hours", str(MOCK_DURATION_HOURS))
+            
+            # Don't need CPU tasks - we're injecting synthetic samples
+            time.sleep(0.1)
+        
+        # Force initial buffer creation if needed
+        if not hasattr(scheduler, 'buffer') or not scheduler.buffer:
+            scheduler.reset_buffer()
+            buffer = scheduler.buffer
+        
+        # Track progress
+        start_time = time.time()
+        chunks_generated = 0
+        total_samples_generated = 0
+        coverage_percent = 0
+        
+        print(f"Target: {expected_chunks} chunks with coverage across all time windows")
+        
+        # Loop until we've generated enough chunks or reached a coverage threshold
+        while chunks_generated < expected_chunks:
+            # Directly inject synthetic samples into the buffer
+            for i in range(10):  # Generate multiple samples per iteration
+                # Generate a synthetic sample
+                sample = generate_synthetic_profile_sample()
+                
+                # Get current monotonic time (used by buffer to determine flushing)
+                monotonic_time = now()
+                
+                # Directly call buffer.write to process the sample with mocked timestamp
+                if buffer:
+                    buffer.write(monotonic_time, sample)
+                    total_samples_generated += 1
+            
+            # Check current progress
+            if buffer and hasattr(buffer, 'mock_flush_count') and hasattr(buffer, 'covered_windows') and hasattr(buffer, 'total_windows'):
+                chunks_generated = buffer.mock_flush_count
+                coverage_percent = (len(buffer.covered_windows) / buffer.total_windows) * 100
+                
+                # Report progress every 10 chunks
+                if chunks_generated % 10 == 0 or (chunks_generated == expected_chunks):
+                    elapsed = time.time() - start_time
+                    print(f"Progress: Generated {chunks_generated}/{expected_chunks} chunks "
+                          f"({coverage_percent:.1f}% window coverage), "
+                          f"{total_samples_generated} samples, elapsed: {elapsed:.1f}s")
+            
+            # Force a buffer flush if needed to make progress
+            if buffer and hasattr(buffer, 'buffer_size') and hasattr(buffer, 'start_monotonic_time'):
+                if random.random() < 0.2:  # 20% chance to force a flush
+                    # Simulate buffer full by setting monotonic time past buffer size
+                    force_time = buffer.start_monotonic_time + buffer.buffer_size + 1
+                    buffer.write(force_time, generate_synthetic_profile_sample())
+            
+            # Small delay to allow other processing
+            time.sleep(0.01)
+            
+            # Break if we've reached target or timeout
+            if (chunks_generated >= expected_chunks or coverage_percent >= 95 or 
+                    (time.time() - start_time > 60)):  # 60 second timeout
+                break
+        
+        # Final report
+        elapsed = time.time() - start_time
+        if buffer and hasattr(buffer, 'covered_windows') and hasattr(buffer, 'total_windows'):
+            coverage_percent = (len(buffer.covered_windows) / buffer.total_windows) * 100
+            
+        print(f"\nSummary: Generated {chunks_generated} profile chunks "
+              f"with {coverage_percent:.1f}% window coverage in {elapsed:.1f}s")
+        print(f"Total samples generated: {total_samples_generated}")
+        
+        # Restore original sampler if needed
+        if scheduler and original_sampler:
+            scheduler.sampler = original_sampler
+    
+    else:
+        # Standard profiling without mocking
+        run_standard_profiling()
+    
+    # Stop the profiler
+    print("Stopping profiler...")
+    sentry_sdk.profiler.stop_profiler()
+    print("Profile test completed")
+
+def run_standard_profiling():
+    """Run standard continuous profiling with real CPU tasks"""
+    # Start the profiler
     sentry_sdk.profiler.start_profiler()
     
     # Run a series of transactions with errors and CPU-intensive tasks
@@ -758,7 +1137,6 @@ def run_continuous_profile_test():
             transaction.set_tag("ui_profile_test", "true") 
             transaction.set_tag("profile_type", "continuous")
             transaction.set_tag("platform_override", PLATFORM)
-            transaction.set_tag("mock_timestamps", str(MOCK_TIMESTAMPS))
             
             # Set some measurements
             transaction.set_measurement(f"test_value_{i}", i * 10, "millisecond")
@@ -778,70 +1156,129 @@ def run_continuous_profile_test():
     # For continuous profiling, let it run longer to collect more data
     print("Running additional CPU tasks to generate more profile samples...")
     
-    # If mocking timestamps, we don't need to run as long
-    duration = 2 if MOCK_TIMESTAMPS else 10
-    for i in range(duration):
+    # Without mocking, we need to run longer to collect meaningful data
+    for i in range(10):
         cpu_intensive_task(300)
         if i % 2 == 0:
-            print(f"Continuous profiling running... ({i+1}/{duration})")
+            print(f"Continuous profiling running... ({i+1}/10)")
         time.sleep(0.2)
-    
-    # Only stop if we want to reset between iterations
-    print("Stopping continuous profiler...")
-    sentry_sdk.profiler.stop_profiler()
-    print("Continuous profile test completed")
     
 def run_transaction_profile_test():
     """Run a test with transaction-based profiling"""
     print("\nStarting transaction profile test...")
     
-    with sentry_sdk.start_transaction(name="test-transaction") as transaction:
-        # Add test tags to the transaction
-        transaction.set_tag("ui_profile_test", "true")
-        transaction.set_tag("profile_type", "transaction")
-        transaction.set_tag("platform_override", PLATFORM)
-        transaction.set_tag("mock_timestamps", str(MOCK_TIMESTAMPS))
+    # When mocking timestamps, we can use synthetic data instead of CPU-intensive tasks
+    if MOCK_TIMESTAMPS:
+        print(f"Mock timestamps enabled: Will generate synthetic transaction profile")
+        print(f"This will simulate a {MOCK_DURATION_HOURS}-hour transaction")
         
-        # Run some spans and errors
-        with Span(op="child-operation", description="test-child-span") as span:
-            span.set_tag("ui_profile_test", "true")
-            simulate_error()
-
-        # Create a nested transaction
-        create_test_transaction()
-
-        # Run CPU intensive task to generate sufficient profile samples
-        print("Running CPU intensive tasks to generate profile samples...")
-        
-        # Run CPU-intensive tasks with appropriate durations
-        for i in range(3):
-            # Set measurement to show in profile
-            transaction.set_measurement(f"ui_test_{i}", i * 10, "millisecond")
+        # Create a transaction with synthetic data
+        with sentry_sdk.start_transaction(name="synthetic-transaction") as transaction:
+            # Add test tags to the transaction
+            transaction.set_tag("ui_profile_test", "true")
+            transaction.set_tag("profile_type", "transaction")
+            transaction.set_tag("platform_override", PLATFORM)
+            transaction.set_tag("mock_duration_hours", str(MOCK_DURATION_HOURS))
+            transaction.set_tag("synthetic_data", "true")
             
-            # Set duration based on whether we're mocking timestamps
-            # If mocking, we can use shorter durations
-            duration_ms = 200 * (i + 1) if MOCK_TIMESTAMPS else 500 * (i + 1)
+            # Add synthetic spans for realism
+            for i in range(3):
+                with Span(op=f"synthetic-span-{i}", description=f"Synthetic span #{i}"):
+                    # No need for CPU tasks - just add synthetic measurements
+                    transaction.set_measurement(f"synthetic_metric_{i}", i * 100, "millisecond")
+                    time.sleep(0.05)  # Small delay for processing
             
-            print(f"Starting CPU intensive task {i+1}/3 (duration: {duration_ms}ms)...")
-            cpu_intensive_task(duration_ms=duration_ms)
-            time.sleep(0.1)
+            # Add a synthetic error
+            try:
+                raise ValueError("Synthetic error for mock profile")
+            except Exception as e:
+                capture_exception(e)
+            
+            # Access the profile directly to ensure it will be valid and has the mock duration
+            scope = sentry_sdk.get_isolation_scope()
+            if hasattr(scope, "profile") and scope.profile:
+                current_profile = scope.profile
                 
-        # Check if the current transaction's profile has enough samples
-        scope = sentry_sdk.get_isolation_scope()
-        if hasattr(scope, "profile") and scope.profile:
-            current_profile = scope.profile
-            if DEBUG_PROFILING:
-                print(f"DEBUG: Current profile has {current_profile.unique_samples} samples")
-            
-            # If not enough samples, force add some
-            if current_profile.unique_samples < MINIMUM_SAMPLES:
+                # For transaction profiles, we need to directly inject synthetic samples
+                # instead of using CPU tasks
                 if DEBUG_PROFILING:
-                    print(f"DEBUG: Adding more samples to ensure minimum of {MINIMUM_SAMPLES}")
-                add_extra_profile_samples(current_profile)
-        elif DEBUG_PROFILING:
-            print("WARNING: Could not find active profile in current scope")
-
-        print("Transaction profile test completed")
+                    print(f"DEBUG: Injecting synthetic samples into transaction profile")
+                
+                # Add at least MINIMUM_SAMPLES + 10 synthetic samples
+                # This will ensure the profile is valid without needing CPU tasks
+                target_samples = max(MINIMUM_SAMPLES + 10, int(MOCK_DURATION_HOURS * 10))
+                
+                for i in range(target_samples):
+                    # Generate offset for this sample (distribute across mock duration)
+                    if i < 5:
+                        # First few samples close to start
+                        offset_ns = i * 1_000_000  # 1ms intervals
+                    else:
+                        # Distribute rest across mock duration
+                        fraction = i / target_samples
+                        offset_ns = int(fraction * MOCK_DURATION_HOURS * 3600 * 1_000_000_000)
+                    
+                    # Generate a synthetic sample
+                    synthetic_sample = generate_synthetic_profile_sample()[0]
+                    
+                    # Extract the stack data
+                    stack_data = synthetic_sample[1]
+                    
+                    # Write the sample to the profile with the calculated offset
+                    current_profile.write(current_profile.start_ns + offset_ns, [synthetic_sample])
+                
+                if DEBUG_PROFILING:
+                    print(f"DEBUG: Injected {target_samples} synthetic samples into transaction profile")
+                    print(f"DEBUG: Profile now has {current_profile.unique_samples} unique samples")
+                
+            print(f"Generated synthetic transaction profile simulating {MOCK_DURATION_HOURS} hours")
+            
+    else:
+        # Standard transaction profiling with real CPU tasks
+        with sentry_sdk.start_transaction(name="test-transaction") as transaction:
+            # Add test tags to the transaction
+            transaction.set_tag("ui_profile_test", "true")
+            transaction.set_tag("profile_type", "transaction")
+            transaction.set_tag("platform_override", PLATFORM)
+            
+            # Run some spans and errors
+            with Span(op="child-operation", description="test-child-span") as span:
+                span.set_tag("ui_profile_test", "true")
+                simulate_error()
+    
+            # Create a nested transaction
+            create_test_transaction()
+    
+            # Run CPU intensive task to generate sufficient profile samples
+            print("Running CPU intensive tasks to generate profile samples...")
+            
+            # Run CPU-intensive tasks with appropriate durations
+            for i in range(3):
+                # Set measurement to show in profile
+                transaction.set_measurement(f"ui_test_{i}", i * 10, "millisecond")
+                
+                duration_ms = 500 * (i + 1)
+                
+                print(f"Starting CPU intensive task {i+1}/3 (duration: {duration_ms}ms)...")
+                cpu_intensive_task(duration_ms=duration_ms)
+                time.sleep(0.1)
+                    
+            # Check if the current transaction's profile has enough samples
+            scope = sentry_sdk.get_isolation_scope()
+            if hasattr(scope, "profile") and scope.profile:
+                current_profile = scope.profile
+                if DEBUG_PROFILING:
+                    print(f"DEBUG: Current profile has {current_profile.unique_samples} samples")
+                
+                # If not enough samples, force add some
+                if current_profile.unique_samples < MINIMUM_SAMPLES:
+                    if DEBUG_PROFILING:
+                        print(f"DEBUG: Adding more samples to ensure minimum of {MINIMUM_SAMPLES}")
+                    add_extra_profile_samples(current_profile)
+            elif DEBUG_PROFILING:
+                print("WARNING: Could not find active profile in current scope")
+    
+    print("Transaction profile test completed")
 
 
 if __name__ == "__main__":
