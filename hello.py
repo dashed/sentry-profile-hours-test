@@ -1,4 +1,11 @@
 # ----------------------- CONFIGURATION OPTIONS -----------------------
+
+# Dictionary of available DSNs - add new ones here
+AVAILABLE_DSNS = {
+    "profile-hours-am2-business": "https://b700116ce3eadd661071ad84ed45028b@o4508486249218048.ingest.us.sentry.io/4508486249938944",
+    "profile-hours-am3-business": "https://e3be3e9fd4c48a23b3a65ec2e62743d1@o4508486299942912.ingest.de.sentry.io/4508486300729424",
+}
+
 # === PROFILING MODE CONFIGURATION ===
 #
 # PROFILE_TYPE determines which of Sentry's two profiling modes to use:
@@ -33,7 +40,7 @@ PROFILE_TYPE = "continuous"  # Options: "continuous" or "transaction"
 #
 # This script forces the platform to the value specified here, regardless of
 # the actual platform the code runs on (Python).
-PLATFORM = "javascript"  # Options: "javascript", "android", "cocoa" (for UI profiles)
+PLATFORM = "python"  # Options: "javascript", "android", "cocoa" (for UI profiles)
 
 # === TIMESTAMP MOCKING CONFIGURATION ===
 #
@@ -131,7 +138,33 @@ DEBUG_PROFILING = True  # Set to True for verbose debugging info
 MINIMUM_SAMPLES = 3  # Minimum number of samples to ensure are collected
 
 # ----------------------- IMPLEMENTATION -----------------------
-import platform  # Import the standard platform module for system info
+try:
+    import platform  # Import the standard platform module for system info
+except ImportError:
+    # Fall back to a minimal platform implementation if the standard one isn't available
+    class PlatformFallback:
+        @staticmethod
+        def machine():
+            return "unknown"
+        
+        @staticmethod
+        def system():
+            return "unknown"
+        
+        @staticmethod
+        def release():
+            return "unknown"
+        
+        @staticmethod
+        def python_implementation():
+            return "python"
+        
+        @staticmethod
+        def python_version():
+            return "3.x"
+    
+    platform = PlatformFallback()
+
 import random
 import threading
 import time
@@ -622,13 +655,6 @@ Profile.write = patched_profile_write
 ProfileChunk.write = patched_profile_chunk_write
 ProfileBuffer.__init__ = patched_profile_buffer_init
 ProfileBuffer.write = patched_profile_buffer_write
-
-# Dictionary of available DSNs - add new ones here
-AVAILABLE_DSNS = {
-    "profile-hours-am2-business": "https://b700116ce3eadd661071ad84ed45028b@o4508486249218048.ingest.us.sentry.io/4508486249938944",
-    "profile-hours-am3-business": "https://e3be3e9fd4c48a23b3a65ec2e62743d1@o4508486299942912.ingest.de.sentry.io/4508486300729424",
-}
-
 
 # Define a before_send hook to modify the platform
 def before_send(event, hint):
@@ -1207,12 +1233,11 @@ def generate_direct_transaction_profiles():
             })
         
         # Get thread metadata
-        thread_metadata = {
-            str(thread.ident): {
+        thread_metadata = {}
+        for thread in threading.enumerate():
+            thread_metadata[str(thread.ident)] = {
                 "name": str(thread.name),
             }
-            for thread in threading.enumerate()
-        }
         
         # Create the processed profile
         processed_profile = {
