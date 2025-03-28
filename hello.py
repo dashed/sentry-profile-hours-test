@@ -28,7 +28,7 @@ AVAILABLE_DSNS = {
 #    - Sends regular "profile chunks" approximately every 60 seconds
 #
 # NOTE: These profiling modes cannot be used simultaneously in the same SDK initialization.
-PROFILE_TYPE = "continuous"  # Options: "continuous" or "transaction"
+PROFILE_TYPE = "transaction"  # Options: "continuous" or "transaction"
 
 # PLATFORM determines how Relay and Sentry categorize profiles for billing purposes:
 #
@@ -55,7 +55,7 @@ PLATFORM = "python"  # Options: "javascript", "android", "cocoa" (for UI profile
 #
 # For transaction profiling: This extends the relative_end_ns of transactions
 # For continuous profiling: This spreads samples across multiple 60-second windows
-MOCK_TIMESTAMPS = True  # Set to True to mock longer profiles without actually running that long
+MOCK_TIMESTAMPS = False  # Set to True to mock longer profiles without actually running that long
 
 # MOCK_DURATION_HOURS sets how many hours of profiling data to simulate.
 # This controls:
@@ -90,7 +90,7 @@ MOCK_SAMPLES_PER_HOUR = 3600  # How many samples per hour to generate (if mockin
 #
 # IMPORTANT: This option only applies when MOCK_TIMESTAMPS is also enabled.
 # For billing tests where you need to generate many profile hours, keep this enabled.
-DIRECT_CHUNK_GENERATION = True  # Set to True to generate chunks directly (bypasses profiler)
+DIRECT_CHUNK_GENERATION = False  # Set to True to generate chunks directly (bypasses profiler)
 
 # SAMPLES_PER_CHUNK controls how many stack samples are included in each profile chunk
 # when using DIRECT_CHUNK_GENERATION mode.
@@ -1041,8 +1041,11 @@ def generate_direct_profile_chunks():
     
     print("\nGenerating and sending chunks...")
     
-    # Timestamp base - start from current time
-    base_timestamp = datetime.now(timezone.utc).timestamp()
+    # Timestamp base - start from the past to avoid clock drift issues
+    current_time = datetime.now(timezone.utc).timestamp()
+    # Start from X hours in the past, where X is the mock duration
+    # This ensures all timestamps are in the past and none exceed current time
+    base_timestamp = current_time - (MOCK_DURATION_HOURS * 3600)
     
     # Generate chunks for the entire duration
     for window_index in range(chunks_to_generate):
@@ -1137,6 +1140,20 @@ def generate_direct_transaction_profiles():
     Unlike continuous profiling which sends chunks regularly, transaction profiling attaches 
     profiles to transactions. This function creates synthetic transactions with attached profiles
     that simulate lengthy durations.
+    
+    IMPORTANT: Transaction profiles MUST be linked to a transaction event to be visible in Sentry.
+    This requires:
+    1. Adding the profile to the envelope BEFORE the transaction
+    2. Adding a "profile" context to the transaction that references the profile ID
+    3. Making sure the transaction ID in profile matches exactly the transaction event ID
+    4. Ensuring consistent timestamps between transaction and profile
+    
+    TIMESTAMP APPROACH:
+    - All transactions are generated with timestamps in the past
+    - The base timestamp is set to (current_time - mock_duration_hours)
+    - Transactions are spread evenly across this past time window
+    - This approach avoids clock drift correction that might occur with future timestamps
+    - Each transaction has a timestamp in the past with the profile's relative timing preserved
     """
     print(f"\nGenerating {MOCK_DURATION_HOURS} hours of transaction profile data directly")
     
@@ -1144,8 +1161,20 @@ def generate_direct_transaction_profiles():
     # We'll create approximately 10 transactions per hour
     transactions_to_generate = max(1, int(MOCK_DURATION_HOURS * 10))
     
+    # Explain the timestamp approach being used
+    current_time = datetime.now(timezone.utc)
+    start_time = current_time - timedelta(hours=MOCK_DURATION_HOURS)
+    end_time = current_time
+    
     print(f"Will generate {transactions_to_generate} transactions with profiles")
     print(f"Each profile will have approximately {SAMPLES_PER_CHUNK} samples")
+    print(f"Using timestamps from the past: {start_time.isoformat()} to {end_time.isoformat()}")
+    
+    # Indicate if this is a UI platform test or not
+    if PLATFORM in ("javascript", "android", "cocoa"):
+        print(f"Platform: {PLATFORM} (UI platform - will be counted as UI profile hours)")
+    else:
+        print(f"Platform: {PLATFORM} (Backend platform - will be counted as backend profile hours)")
     
     # Get the client and its options
     client = sentry_sdk.get_client()
@@ -1170,8 +1199,11 @@ def generate_direct_transaction_profiles():
     
     print("\nGenerating and sending transaction profiles...")
     
-    # Time base for transactions
-    base_timestamp = datetime.now(timezone.utc).timestamp()
+    # Time base for transactions - start from the past to avoid clock drift issues
+    current_time = datetime.now(timezone.utc).timestamp()
+    # Start from X hours in the past, where X is the mock duration
+    # This ensures all timestamps are in the past and none exceed current time
+    base_timestamp = current_time - (MOCK_DURATION_HOURS * 3600)
     
     # For transaction profiles, we'll distribute profiles across the mocked duration
     hours_in_seconds = MOCK_DURATION_HOURS * 3600
@@ -1184,17 +1216,25 @@ def generate_direct_transaction_profiles():
         profile_id = uuid.uuid4().hex
         
         # Calculate where in the mocked duration this transaction fits
-        # Spread transactions evenly across the mocked duration
+        # Spread transactions evenly across the mocked duration - all in the past
         relative_position = idx / transactions_to_generate
         transaction_timestamp = base_timestamp + (relative_position * hours_in_seconds)
         
-        # Create profile start timestamp
-        profile_start_ns = int(nanosecond_time())
+        # Ensure the transaction timestamp doesn't exceed current time
+        # (should never happen with our base_timestamp calculation, but double-check)
+        current_time = datetime.now(timezone.utc).timestamp()
+        if transaction_timestamp > current_time:
+            print(f"WARNING: Transaction timestamp {transaction_timestamp} is in the future! Adjusting to past.")
+            transaction_timestamp = current_time - 60  # 1 minute in the past
+        
+        # Create profile start timestamp - use actual transaction timestamp for consistency
+        profile_start_ns = int(transaction_timestamp * 1_000_000_000)  # Convert seconds to nanoseconds
         
         # Calculate how long this profile should appear to run
         # For transaction profiles, we can't exceed 30 seconds in reality
         # But we can fake longer durations in the transaction metadata
-        tx_duration_sec = min(30.0, hours_in_seconds / transactions_to_generate)
+        # Maximum single-transaction duration should be less than what Relay validates (30 sec)
+        tx_duration_sec = min(25.0, hours_in_seconds / transactions_to_generate)
         
         # For transaction profiles, instead of representing absolute timestamps,
         # samples use nanosecond offsets from the start of the profile
@@ -1280,16 +1320,31 @@ def generate_direct_transaction_profiles():
                     "active_thread_id": str(threading.get_ident()),
                 }
             ],
+            # Add tags for searchability in Sentry UI
+            "tags": {
+                "profile_type": "transaction",
+                "ui_profile_test": PLATFORM in ("javascript", "android", "cocoa"),  # Only true for UI platforms
+                "is_ui_platform": PLATFORM in ("javascript", "android", "cocoa"),  # Explicit tag for platform type
+                "synthetic": "true",
+                "direct_generation": "true",
+                "mock_duration_hours": str(MOCK_DURATION_HOURS),
+                "platform_override": PLATFORM,
+                "original_platform": "python",
+                "transaction_id": event_id,
+                "mock_timestamps": "past",
+                "past_timestamp_base": datetime.fromtimestamp(base_timestamp, tz=timezone.utc).isoformat()
+            },
             # Add debugging info
             "debug_info": {
                 "original_platform": "python",
                 "spoofed_platform": PLATFORM,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "test_id": str(uuid.uuid4())[:8],
-                "mock_timestamp": "true",
+                "current_timestamp": datetime.now(timezone.utc).isoformat(),
+                "mock_timestamp": "past",
+                "profile_timestamp": datetime.fromtimestamp(transaction_timestamp, tz=timezone.utc).isoformat(),
                 "mock_duration_hours": str(MOCK_DURATION_HOURS),
                 "transaction_index": idx,
-                "direct_generation": "true"
+                "direct_generation": "true",
+                "test_run_id": str(uuid.uuid4())[:8]
             }
         }
         
@@ -1309,15 +1364,26 @@ def generate_direct_transaction_profiles():
                     "span_id": uuid.uuid4().hex[:16],
                     "op": "synthetic",
                     "status": "ok"
+                },
+                # IMPORTANT: Add profile context to link the transaction to its profile
+                "profile": {
+                    "profile_id": profile_id
                 }
             },
             "tags": {
                 "transaction": f"synthetic-transaction-{idx}",
                 "synthetic": "true",
+                "profile_type": "transaction",  # Explicitly mark as transaction profiling
                 "mock_duration_hours": str(MOCK_DURATION_HOURS),
-                "ui_profile_test": "true",
+                "ui_profile_test": PLATFORM in ("javascript", "android", "cocoa"),  # Only true for UI platforms
+                "is_ui_platform": PLATFORM in ("javascript", "android", "cocoa"),  # Explicit tag for platform type
                 "platform_override": PLATFORM,
-                "original_platform": "python"
+                "original_platform": "python",
+                "test_run_id": str(uuid.uuid4())[:8],  # Add unique test run ID
+                "profile_id": profile_id,  # Add direct reference to profile ID
+                "direct_generation": "true",
+                "mock_timestamps": "past",  # Indicate we're using past timestamps
+                "past_timestamp_base": datetime.fromtimestamp(base_timestamp, tz=timezone.utc).isoformat()
             },
             # Add some spans for realism
             "spans": [
@@ -1341,21 +1407,23 @@ def generate_direct_transaction_profiles():
         # Create an envelope with both the transaction and its profile
         envelope = Envelope()
         
-        # Add the transaction
-        envelope.add_item(
-            Item(
-                payload=PayloadRef(json=transaction_event),
-                type="transaction",
-                headers={"platform": PLATFORM}  # Set platform in headers
-            )
-        )
-        
-        # Add the profile
+        # IMPORTANT: Add profile FIRST, then transaction
+        # This ensures Relay processes them in the correct order
+        # Add the profile first
         envelope.add_item(
             Item(
                 payload=PayloadRef(json=profile_payload),
                 type="profile",
                 headers={"platform": PLATFORM}  # Critical for UI profile hours
+            )
+        )
+        
+        # Add the transaction second
+        envelope.add_item(
+            Item(
+                payload=PayloadRef(json=transaction_event),
+                type="transaction",
+                headers={"platform": PLATFORM}  # Set platform in headers
             )
         )
         
