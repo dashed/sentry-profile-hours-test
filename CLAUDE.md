@@ -28,6 +28,208 @@
   - `relay/`: Proxy service that validates and processes events
   - `sentry-docs/`: Documentation for Sentry platform and SDKs
 
+## Relay - Sentry's Ingestion Proxy
+
+Relay is Sentry's data ingestion proxy and processing service. It acts as the first layer handling all incoming data before it reaches the Sentry processing pipeline.
+
+### Relay's Role in Profiling
+
+Relay performs several critical functions for profiling:
+
+1. **Profile Validation:**
+   - Ensures profiles conform to expected formats
+   - Validates duration (maximum 30s for transaction profiles)
+   - Validates continuous profile chunk duration (maximum 66s)
+   - Checks for sufficient samples
+   - Verifies platform compatibility
+
+2. **Profile Classification:**
+   - Determines if a profile is UI or Backend based on platform:
+   ```rust
+   pub fn profile_type(&self) -> ProfileType {
+       match self.profile.platform.as_str() {
+           "cocoa" | "android" | "javascript" => ProfileType::Ui,
+           _ => ProfileType::Backend,
+       }
+   }
+   ```
+   - This classification affects data category selection for quotas and billing
+
+3. **Profile Envelope Processing:**
+   - Transaction-based profiles use item type `"profile"` 
+   - Continuous profiles use item type `"profile_chunk"`
+   - Each type has different validation and processing rules
+
+4. **Feature Flag Enforcement:**
+   - Enforces feature flags for continuous profiling:
+   ```rust
+   project_info.has_feature(Feature::ContinuousProfiling)
+   ```
+   - Controls transaction profiling with:
+   ```rust
+   project_info.has_feature(Feature::Profiling)
+   ```
+
+5. **Profile Filtering:**
+   - Applies project-specific filters to profiles
+   - Drops profiles if the feature is not enabled
+   - Drops standalone profiles without a transaction
+   - Prevents duplicates by dropping excessive profiles
+
+6. **Profile Expansion:**
+   - Extracts transaction metadata and tags
+   - Processes profile data based on version and platform
+   - Enforces maximum profile size limits
+   - Sets metadata in the envelope for downstream processing
+
+### Key Relay Components for Profiling
+
+1. **`relay-profiling/src/lib.rs`**:
+   - Core profile processing functionality
+   - Defines validation constants:
+   ```rust
+   const MAX_PROFILE_DURATION: Duration = Duration::from_secs(30);
+   const MAX_PROFILE_CHUNK_DURATION: Duration = Duration::from_secs(66);
+   ```
+   - Contains platform classification logic
+
+2. **`relay-server/src/services/processor/profile.rs`**:
+   - Handles transaction profiles
+   - Enforces feature flag checks
+   - Ensures proper transaction-profile pairing
+   - Discards profiles with validation errors
+
+3. **`relay-server/src/services/processor/profile_chunk.rs`**:
+   - Processes continuous profile chunks
+   - Controls feature flag enforcement
+   - Validates and expands profile chunks
+   - Sets profile type for proper billing categorization
+
+4. **`relay-profiling/src/outcomes.rs`**:
+   - Defines discard reasons for invalid profiles:
+   ```rust
+   pub fn discard_reason(err: ProfileError) -> &'static str {
+       match err {
+           ProfileError::NotEnoughSamples => "profiling_not_enough_samples",
+           ProfileError::DurationIsTooLong => "profiling_duration_is_too_long",
+           ProfileError::PlatformNotSupported => "profiling_platform_not_supported",
+           // More reasons...
+       }
+   }
+   ```
+
+### Implications for Profile Hours Testing
+
+When testing profile hours with the Python SDK:
+
+1. **Platform Setting is Critical:**
+   - Relay classifies UI vs Backend profiles based strictly on platform string
+   - Consistent platform values must be set in both envelope headers and profile payload
+
+2. **Feature Flag Check:**
+   - Your project must have appropriate feature flags enabled
+   - Transaction profiling requires the "profiling" feature
+   - Continuous profiling requires the "continuous-profiling" feature
+
+3. **Validation Constraints:**
+   - Transaction profiles must comply with 30-second maximum duration
+   - Profile chunks must stay within 66-second window limits
+   - Proper timestamp formatting is essential (nanosecond offsets for transaction profiles, Unix timestamps for continuous profiles)
+   - Profiles must contain enough samples (minimum sample check)
+
+4. **Synthetic Profile Generation Strategy:**
+   - Mock data must adhere to Relay's validation constraints
+   - The 66-second chunk limit is why we generate multiple chunks for continuous profiling
+   - Duration mocking happens before the validation to simulate longer duration profiles
+
+### Relay's Profile Test Fixtures
+
+Relay's test suite includes valuable examples of valid profile formats that can be referenced when creating synthetic profiles:
+
+1. **Transaction Profile Examples:**
+   - `relay-profiling/tests/fixtures/sample/v1/valid.json` - Valid transaction profile
+   - `relay-profiling/tests/fixtures/sample/v1/segment_id.json` - Profile with segment ID
+
+2. **Continuous Profile Examples:**
+   - `relay-profiling/tests/fixtures/sample/v2/valid.json` - Valid continuous profile chunk
+   - `relay-profiling/tests/fixtures/android/chunk/valid.json` - Valid Android profile chunk
+
+3. **Integration Testing:**
+   The `tests/integration/test_profile_chunks.py` file demonstrates:
+   - How profile data flows through the Relay processing pipeline
+   - Feature flag requirements for continuous profiling:
+   ```python
+   project_config.setdefault("features", []).append(
+       "organizations:continuous-profiling"
+   )
+   ```
+   - Proper envelope structure for profile chunks:
+   ```python
+   envelope = Envelope()
+   envelope.add_item(Item(payload=PayloadRef(bytes=profile), type="profile_chunk"))
+   ```
+   - Validation and outcome reporting for invalid profiles:
+   ```python
+   assert outcomes == [
+       {
+           "category": DataCategory.PROFILE_CHUNK.value,
+           "outcome": 3,  # Invalid
+           "reason": "profiling_platform_not_supported",
+           # ...other fields
+       },
+   ]
+   ```
+   - Rate limiting behavior for profiles:
+   ```python
+   project_config["quotas"] = [
+       {
+           "id": f"test_rate_limiting_{uuid.uuid4().hex}",
+           "categories": ["profile_chunk_ui"],  # Target profile chunks specifically
+           "limit": 0,  # Block all profile chunks
+           "reasonCode": "profile_chunks_exceeded",
+       }
+   ]
+   ```
+
+These test fixtures and integration tests provide valuable insights into how Relay processes profiles and the validation rules it enforces, which is essential knowledge when implementing profile mocking strategies.
+
+### Recent Relay Profiling Enhancements
+
+Relay has recently improved its profile chunk handling with important changes that affect profile categorization and rate limiting:
+
+1. **UI Profile Chunk Category (PR #4593)**
+   - Added dedicated data category for UI profile chunks: `PROFILE_CHUNK_UI`
+   - Separates UI profile chunks from backend profile chunks for better categorization
+   - Added to `relay-base-schema/src/data_category.rs`:
+   ```rust
+   /// A continuous profiling profile chunk for UI platforms (mobile, javascript)
+   PROFILE_CHUNK_UI = 23,
+   ```
+   - This enables separate quotas and rate limiting for UI vs backend profile chunks
+
+2. **Platform-Based Chunk Classification (PR #4595)**
+   - Enhanced profile chunk handling to determine UI vs Backend based on platform
+   - Implemented `profile_type()` function to classify chunks:
+   ```rust
+   pub fn profile_type(&self) -> ProfileType {
+       match self.profile.platform.as_str() {
+           "cocoa" | "android" | "javascript" => ProfileType::Ui,
+           _ => ProfileType::Backend,
+       }
+   }
+   ```
+   - Modified rate limiting and outcome reporting to use the appropriate category
+   - Profile chunks without a platform header are processed but may not be correctly categorized
+   - Improves accuracy in billing and quota enforcement
+
+3. **Implications for Profile Hours Testing**
+   - The platform value is now even more critical for proper categorization
+   - Rate limits can be set separately for UI vs backend profile chunks
+   - Testing should verify proper platform setting in all profile chunks
+   - Future Relay versions may use platform headers (not just payload inspection)
+
+These changes ensure that UI profile chunks (from JavaScript, Android, and iOS) are properly categorized and can be subject to different quotas than backend profile chunks. This is particularly important for profile hours testing, as it ensures accurate platform-based billing.
+
 ## Available Tools
 - `gh` (GitHub CLI) is available for GitHub operations
 
