@@ -3,7 +3,52 @@ import time
 
 import sentry_sdk
 from sentry_sdk import capture_exception, capture_message
+from sentry_sdk.envelope import Envelope, Item, PayloadRef
+from sentry_sdk.profiler.continuous_profiler import ProfileChunk
+
+# Monkey patch to override platform from "python" to "android" for profiles
+from sentry_sdk.profiler.transaction_profiler import Profile
 from sentry_sdk.tracing import Span
+
+# Save original methods
+original_profile_to_json = Profile.to_json
+original_profile_chunk_to_json = ProfileChunk.to_json
+original_add_profile_chunk = Envelope.add_profile_chunk
+
+
+# Create patched methods that set platform to "android"
+def patched_profile_to_json(self, event_opt, options):
+    result = original_profile_to_json(self, event_opt, options)
+    result["platform"] = "android"
+    return result
+
+
+def patched_profile_chunk_to_json(self, profiler_id, options, sdk_info):
+    result = original_profile_chunk_to_json(self, profiler_id, options, sdk_info)
+    result["platform"] = "android"
+    return result
+
+
+# Patch Envelope.add_profile_chunk to force "android" platform
+def patched_add_profile_chunk(self, profile_chunk):
+    # Force "android" platform in the profile_chunk itself
+    if isinstance(profile_chunk, dict):
+        profile_chunk["platform"] = "android"
+
+    # Use original method but ensure platform header is "android"
+    self.add_item(
+        Item(
+            payload=PayloadRef(json=profile_chunk),
+            type="profile_chunk",
+            headers={"platform": "android"},
+        )
+    )
+
+
+# Apply the patches
+Profile.to_json = patched_profile_to_json
+ProfileChunk.to_json = patched_profile_chunk_to_json
+Envelope.add_profile_chunk = patched_add_profile_chunk
 
 # Dictionary of available DSNs - add new ones here
 AVAILABLE_DSNS = {
@@ -20,6 +65,21 @@ def before_send(event, hint):
     #
     # Comment out for profile hours (PROFILE_DURATION)
     event["platform"] = "android"
+
+    # Recursively replace any "python" platform values with "android"
+    def replace_platform_recursively(obj):
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                if key == "platform" and value == "python":
+                    obj[key] = "android"
+                elif isinstance(value, (dict, list)):
+                    replace_platform_recursively(value)
+        elif isinstance(obj, list):
+            for item in obj:
+                if isinstance(item, (dict, list)):
+                    replace_platform_recursively(item)
+
+    replace_platform_recursively(event)
     return event
 
 
@@ -28,7 +88,7 @@ def profiles_sampler(sampling_context):
 
 
 sentry_sdk.init(
-    dsn=AVAILABLE_DSNS["profile-hours-am2-business"],
+    dsn=AVAILABLE_DSNS["profile-hours-am3-business"],
     # Set traces_sample_rate to 1.0 to capture 100%
     # of transactions for tracing.
     traces_sample_rate=1.0,
