@@ -32,3 +32,214 @@
 
 ## React Testing
 - Use exports from 'sentry-test/reactTestingLibrary' instead of directly from '@testing-library/react'
+
+## Vroom - Sentry's Profiling Service
+
+Vroom is Sentry's dedicated profiling service, responsible for processing and deriving data from profiles. It's written in Go and serves as the backend processing engine for all profile data sent to Sentry.
+
+### Core Components
+
+1. **Main Service (`cmd/vroom/`):**
+   - Provides HTTP endpoints for receiving profiles
+   - Processes incoming profile data
+   - Generates derived data (flame graphs, etc.)
+   - Handles storage and retrieval of profiles
+
+2. **Utilities:**
+   - **Downloader (`cmd/downloader/`):** Tool for downloading profiles
+   - **Issue Detection (`cmd/issuedetection/`):** Identifies issues in profiles
+
+3. **Key Packages:**
+   - **`internal/profile/`:** Core profile data structures and processing
+   - **`internal/platform/`:** Platform-specific handling (Android, JavaScript, etc.)
+   - **`internal/flamegraph/`:** Flame graph generation
+   - **`internal/occurrence/`:** Issue detection and occurrence tracking
+   - **`internal/chunk/`:** Handling profile chunks from continuous profiling
+
+### Platform Support
+
+Vroom supports multiple platforms for profiling:
+
+```go
+const (
+    Android    Platform = "android"    // Android apps (UI)
+    Cocoa      Platform = "cocoa"      // iOS/macOS apps (UI)
+    Java       Platform = "java"       // JVM-based apps (backend)
+    JavaScript Platform = "javascript" // Web/browser apps (UI)
+    Node       Platform = "node"       // NodeJS apps (backend) 
+    PHP        Platform = "php"        // PHP apps (backend)
+    Python     Platform = "python"     // Python apps (backend)
+    Rust       Platform = "rust"       // Rust apps (backend)
+)
+```
+
+The platform determination is critical for profile classification. UI profiles (Android, Cocoa, JavaScript) are categorized differently than backend profiles for billing and analysis purposes.
+
+### How Vroom Fits in the Profiling Flow
+
+1. **Data Ingestion:**
+   - SDKs (like sentry-python) collect profiling data
+   - Data is sent to Sentry via Relay
+   - Relay categorizes profiles by platform and forwards them
+
+2. **Profile Processing:**
+   - Vroom receives profiles via HTTP endpoints
+   - Processes the raw profile data
+   - Normalizes formats across different platforms
+   - Generates derived data (flame graphs, statistics, etc.)
+
+3. **Storage and Retrieval:**
+   - Processed profiles are stored in cloud storage
+   - Metadata is stored in databases for querying
+   - Used for visualization and analysis in the Sentry UI
+
+### Relevance to Profile Hours Testing
+
+When testing UI profile hours with the Python SDK:
+
+1. Our profile spoofing in the SDK sets the platform to a UI platform (javascript, android, cocoa)
+2. Relay categorizes the profile based on this platform header
+3. Vroom processes the profile according to the specified platform
+4. The profile contributes to UI profile hours in Sentry's billing system
+
+Understanding this flow is important because it explains why platform spoofing needs to happen at multiple levels in the SDK to ensure proper categorization throughout the entire pipeline.
+
+## Sentry Python SDK Blueprint
+
+### Core Components
+
+The Sentry Python SDK (`external/sentry-python/`) has several key components:
+
+#### Main Module Structure
+- **`sentry_sdk/__init__.py`** - Main entry point, exports the public API
+- **`sentry_sdk/_init_implementation.py`** - Actual init and core SDK implementation
+- **`sentry_sdk/client.py`** - Client class, handles event capturing and processing
+- **`sentry_sdk/hub.py`** - Hub implementation, manages scopes and clients
+- **`sentry_sdk/scope.py`** - Scope management, handles contextual data
+- **`sentry_sdk/transport.py`** - Handles sending data to Sentry
+- **`sentry_sdk/envelope.py`** - Envelope implementation for encapsulating data
+- **`sentry_sdk/tracing.py`** - Tracing implementation for performance monitoring
+
+#### Profiling Components 
+- **`sentry_sdk/profiler/transaction_profiler.py`** - Transaction-based profiling implementation
+  - Contains `Profile` class, sampling logic and the `PROFILE_MINIMUM_SAMPLES` constant
+  - Implements `Profile.valid()` method which determines if profiles are valid for sending
+  - Methods for turning profiles into JSON format
+- **`sentry_sdk/profiler/continuous_profiler.py`** - Continuous profiling implementation
+  - Contains `ProfileChunk` class for creating profile chunks
+  - Contains `ProfileBuffer` for managing profile data
+  - Implements timestamping for profiling data
+- **`sentry_sdk/profiler/utils.py`** - Utilities for profiling
+  - Contains `DEFAULT_SAMPLING_FREQUENCY` and extraction utilities
+
+#### Data Processing
+- **`sentry_sdk/serializer.py`** - Serializes Python objects for sending to Sentry
+- **`sentry_sdk/utils.py`** - Various utilities used throughout the SDK
+- **`sentry_sdk/scrubber.py`** - Data scrubbing utilities for PII removal
+
+#### Integration Points
+- **`sentry_sdk/integrations/`** - Contains integrations for various frameworks and libraries
+
+### Important Paths for Profiling
+When working with profiles and particularly UI profile hours, these are the key files:
+
+1. **Sentry Platform Profile Classification:**
+   - `external/sentry/src/sentry/profiles/task.py` - Contains `UI_PROFILE_PLATFORMS` and categorization logic
+   - Sets which platforms are considered UI platforms: "cocoa", "android", "javascript"
+
+2. **Relay Profile Processing:**
+   - `external/relay/relay-profiling/src/lib.rs` - Contains logic for profile type determination
+   - Classifies profiles as UI vs backend based on platform header
+
+3. **Python SDK Profiling:**
+   - `external/sentry-python/sentry_sdk/profiler/transaction_profiler.py` - Transaction-based profiling
+   - `external/sentry-python/sentry_sdk/profiler/continuous_profiler.py` - Continuous profiling
+
+### Key Concepts for SDK Monkey Patching
+
+1. **Platform Spoofing:**
+   - Platform needs to be set in:
+     - Envelope headers for fast classification by Relay
+     - Profile payload itself for processing by Sentry
+     - Event data for proper association
+
+2. **Transaction vs Continuous Profiling:**
+   - **Transaction profiling:** Tied to a single transaction's duration
+     - Uses `Profile` class from `transaction_profiler.py`
+     - Time measurements use `elapsed_since_start_ns` (nanoseconds since start)
+   - **Continuous profiling:** Ongoing profiling across multiple transactions
+     - Uses `ProfileChunk` class from `continuous_profiler.py`
+     - Time measurements use absolute timestamps
+
+3. **Sample Requirements:**
+   - Profiles require a minimum number of samples (`PROFILE_MINIMUM_SAMPLES`) 
+   - Insufficient samples lead to profile discarding
+
+4. **Timestamp Manipulation:**
+   - For transaction profiles: Modify `relative_end_ns` in transactions
+   - For continuous profiles: Manipulate timestamps in `ProfileChunk.samples`
+
+## Mocking Profile Hours
+
+The `hello.py` file contains a comprehensive example of mocking profile hours, with these capabilities:
+
+1. **Configuration Options:**
+   - Toggle between continuous and transaction profiling
+   - Select UI platform for testing ("javascript", "android", "cocoa")
+   - Enable/disable timestamp mocking
+   - Set mock duration in hours
+   - Control sample generation rates
+
+2. **Monkey Patching Approach:**
+   - Patches `Profile.to_json` and `ProfileChunk.to_json` to modify platform
+   - Patches `Envelope.add_profile_chunk` to modify envelope headers
+   - Patches `Profile.valid` to ensure profiles aren't discarded
+   - Patches write methods to inject additional samples
+   - Patches buffer processing to spread samples across mocked timespan
+
+## Useful Code Snippets
+
+### Initializing Sentry with Profiling Enabled
+
+```python
+# For transaction-based profiling:
+sentry_sdk.init(
+    dsn="...",
+    traces_sample_rate=1.0,
+    profiles_sample_rate=1.0,  # Enable transaction profiling
+)
+
+# For continuous profiling:
+sentry_sdk.init(
+    dsn="...",
+    traces_sample_rate=1.0,
+    profile_session_sample_rate=1.0,  # Enable continuous profiling
+    _experiments={
+        "continuous_profiling_auto_start": True,
+    }
+)
+```
+
+### Accessing the Current Profile
+
+```python
+# Get the current profile from scope
+scope = sentry_sdk.get_isolation_scope()
+if hasattr(scope, "profile") and scope.profile:
+    current_profile = scope.profile
+    # Now you can work with the profile
+```
+
+### Starting and Stopping Profilers
+
+```python
+# Start/stop continuous profiling
+sentry_sdk.profiler.start_profiler()
+# ... do work
+sentry_sdk.profiler.stop_profiler()
+
+# Transaction profiling happens automatically with transactions when enabled
+with sentry_sdk.start_transaction(name="my-transaction"):
+    # Transaction is automatically profiled if profiles_sample_rate > 0
+    pass
+```
