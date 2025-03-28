@@ -6,6 +6,11 @@ AVAILABLE_DSNS = {
     "profile-hours-am3-business": "https://e3be3e9fd4c48a23b3a65ec2e62743d1@o4508486299942912.ingest.de.sentry.io/4508486300729424",
 }
 
+# Define which platforms are considered UI platforms
+# These platforms get categorized as UI profile hours rather than backend profile hours
+# See relay-profiling/src/lib.rs:ProfileChunk::profile_type() for the canonical Relay source
+UI_PLATFORMS = ("javascript", "android", "cocoa")
+
 # === PROFILING MODE CONFIGURATION ===
 #
 # PROFILE_TYPE determines which of Sentry's two profiling modes to use:
@@ -673,16 +678,22 @@ def before_send(event, hint):
     # These will be visible in Sentry UI and searchable
     if not event.get("tags"):
         event["tags"] = {}
-    event["tags"]["ui_profile_test"] = "true"
+    
+    # Only mark as UI profile test if it's using a UI platform
+    is_ui_platform = PLATFORM in UI_PLATFORMS
+    event["tags"]["ui_profile_test"] = is_ui_platform
+    event["tags"]["is_ui_platform"] = is_ui_platform
     event["tags"]["original_platform"] = original_platform
     event["tags"]["platform_override"] = PLATFORM
     event["tags"]["test_timestamp"] = datetime.now(timezone.utc).isoformat()
+    
     # Generate a unique test ID to identify this run
     test_id = str(uuid.uuid4())[:8]
     event["tags"]["test_run_id"] = test_id
     
     # Add this to SDK scope too - will be added to all future events
-    set_tag("ui_profile_test", "true") 
+    set_tag("ui_profile_test", is_ui_platform) 
+    set_tag("is_ui_platform", is_ui_platform)
     set_tag("test_run_id", test_id)
 
     # Recursively replace any "python" platform values with PLATFORM
@@ -1010,7 +1021,19 @@ def generate_direct_profile_chunks():
     hours_in_seconds = MOCK_DURATION_HOURS * 3600
     chunks_to_generate = max(1, int(hours_in_seconds / 60))
     
+    # Explain the timestamp approach being used
+    current_time = datetime.now(timezone.utc)
+    start_time = current_time - timedelta(hours=MOCK_DURATION_HOURS)
+    end_time = current_time
+    
     print(f"Will generate {chunks_to_generate} profile chunks with {SAMPLES_PER_CHUNK} samples each")
+    print(f"Using timestamps from the past: {start_time.isoformat()} to {end_time.isoformat()}")
+    
+    # Indicate if this is a UI platform test or not
+    if PLATFORM in UI_PLATFORMS:
+        print(f"Platform: {PLATFORM} (UI platform - will be counted as UI profile hours)")
+    else:
+        print(f"Platform: {PLATFORM} (Backend platform - will be counted as backend profile hours)")
     
     # Generate a profiler_id - this would normally be created by the SDK
     profiler_id = uuid.uuid4().hex
@@ -1074,16 +1097,31 @@ def generate_direct_profile_chunks():
         # Override platform to match the configuration
         chunk_data["platform"] = PLATFORM
         
+        # Add tags for searchability in Sentry UI
+        chunk_data["tags"] = {
+            "profile_type": "continuous", 
+            "ui_profile_test": PLATFORM in ("javascript", "android", "cocoa"),  # Only true for UI platforms
+            "is_ui_platform": PLATFORM in ("javascript", "android", "cocoa"),  # Explicit tag for platform type
+            "synthetic": "true",
+            "direct_generation": "true",
+            "mock_duration_hours": str(MOCK_DURATION_HOURS),
+            "platform_override": PLATFORM,
+            "original_platform": "python",
+            "mock_timestamps": "past",
+            "window_index": str(window_index)
+        }
+        
         # Add debugging info
         chunk_data["debug_info"] = {
             "original_platform": "python",
             "spoofed_platform": PLATFORM,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "test_id": str(uuid.uuid4())[:8],
-            "mock_timestamp": "true",
+            "current_timestamp": datetime.now(timezone.utc).isoformat(),
+            "mock_timestamp": "past",
+            "chunk_timestamp": datetime.fromtimestamp(window_timestamp, tz=timezone.utc).isoformat(),
             "mock_duration_hours": str(MOCK_DURATION_HOURS),
             "window_index": window_index,
-            "direct_generation": "true"
+            "direct_generation": "true",
+            "test_run_id": str(uuid.uuid4())[:8]
         }
         
         # Create an envelope and add the profile chunk
@@ -1171,7 +1209,7 @@ def generate_direct_transaction_profiles():
     print(f"Using timestamps from the past: {start_time.isoformat()} to {end_time.isoformat()}")
     
     # Indicate if this is a UI platform test or not
-    if PLATFORM in ("javascript", "android", "cocoa"):
+    if PLATFORM in UI_PLATFORMS:
         print(f"Platform: {PLATFORM} (UI platform - will be counted as UI profile hours)")
     else:
         print(f"Platform: {PLATFORM} (Backend platform - will be counted as backend profile hours)")
@@ -1520,7 +1558,10 @@ def run_continuous_profile_test():
         
         # Create initial transactions to set up the profiling context
         with sentry_sdk.start_transaction(name="setup-transaction") as transaction:
-            transaction.set_tag("ui_profile_test", "true") 
+            # Only mark as UI profile test if it's using a UI platform
+            is_ui_platform = PLATFORM in ("javascript", "android", "cocoa")
+            transaction.set_tag("ui_profile_test", is_ui_platform) 
+            transaction.set_tag("is_ui_platform", is_ui_platform)
             transaction.set_tag("profile_type", "continuous")
             transaction.set_tag("synthetic_data", "true")
             transaction.set_tag("mock_duration_hours", str(MOCK_DURATION_HOURS))
@@ -1614,7 +1655,9 @@ def run_standard_profiling():
     for i in range(3):
         with sentry_sdk.start_transaction(name=f"test-transaction-{i}") as transaction:
             # Add test tags
-            transaction.set_tag("ui_profile_test", "true") 
+            is_ui_platform = PLATFORM in UI_PLATFORMS
+            transaction.set_tag("ui_profile_test", is_ui_platform) 
+            transaction.set_tag("is_ui_platform", is_ui_platform)
             transaction.set_tag("profile_type", "continuous")
             transaction.set_tag("platform_override", PLATFORM)
             
@@ -1655,7 +1698,9 @@ def run_transaction_profile_test():
         # Create a transaction with synthetic data
         with sentry_sdk.start_transaction(name="synthetic-transaction") as transaction:
             # Add test tags to the transaction
-            transaction.set_tag("ui_profile_test", "true")
+            is_ui_platform = PLATFORM in UI_PLATFORMS
+            transaction.set_tag("ui_profile_test", is_ui_platform)
+            transaction.set_tag("is_ui_platform", is_ui_platform)
             transaction.set_tag("profile_type", "transaction")
             transaction.set_tag("platform_override", PLATFORM)
             transaction.set_tag("mock_duration_hours", str(MOCK_DURATION_HOURS))
