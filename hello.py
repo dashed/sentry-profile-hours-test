@@ -1700,93 +1700,20 @@ def generate_direct_transaction_profiles():
             "thread_metadata": thread_metadata,
         }
 
-        # Create the full profile payload (like Profile.to_json)
-        profile_payload = {
-            "environment": client.options.get("environment"),
-            "event_id": profile_id,
-            "platform": PLATFORM,  # Override to target platform
-            "profile": processed_profile,
-            "release": client.options.get("release", ""),
-            "timestamp": transaction_timestamp,
-            "version": "1",
-            "device": {
-                "architecture": platform.machine(),
-            },
-            "os": {
-                "name": platform.system(),
-                "version": platform.release(),
-            },
-            "runtime": {
-                "name": platform.python_implementation(),
-                "version": platform.python_version(),
-            },
-            "transactions": [
-                {
-                    "id": event_id,
-                    "name": f"synthetic-transaction-{idx}",
-                    "relative_start_ns": "0",
-                    # This is the critical field for mocking long durations
-                    # We set it to the entire mocked duration in nanoseconds
-                    "relative_end_ns": str(
-                        int(
-                            MOCK_DURATION_HOURS
-                            * 3600
-                            * 1_000_000_000
-                            / transactions_to_generate
-                        )
-                    ),
-                    "trace_id": trace_id,
-                    # Get the current thread ID (same way the SDK does)
-                    "active_thread_id": str(threading.get_ident()),
-                }
-            ],
-            # Add tags for searchability in Sentry UI
-            "tags": {
-                "profile_type": "transaction",
-                "ui_profile_test": PLATFORM
-                in UI_PLATFORMS,  # Only true for UI platforms
-                "is_ui_platform": PLATFORM
-                in UI_PLATFORMS,  # Explicit tag for platform type
-                "synthetic": "true",
-                "direct_generation": "true",
-                "mock_duration_hours": str(MOCK_DURATION_HOURS),
-                "platform_override": PLATFORM,
-                "original_platform": "python",
-                "transaction_id": event_id,
-                "mock_timestamps": "past",
-                "past_timestamp_base": datetime.fromtimestamp(
-                    base_timestamp, tz=timezone.utc
-                ).isoformat(),
-            },
-            # Add debugging info
-            "debug_info": {
-                "original_platform": "python",
-                "spoofed_platform": PLATFORM,
-                "current_timestamp": datetime.now(timezone.utc).isoformat(),
-                "mock_timestamp": "past",
-                "profile_timestamp": datetime.fromtimestamp(
-                    transaction_timestamp, tz=timezone.utc
-                ).isoformat(),
-                "mock_duration_hours": str(MOCK_DURATION_HOURS),
-                "transaction_index": idx,
-                "direct_generation": "true",
-                "test_run_id": str(uuid.uuid4())[:8],
-            },
-        }
+        # Calculate proper transaction duration in seconds (for timestamps)
+        # Ensure this is within Relay's validation limits (< 30 seconds)
+        transaction_duration = min(25.0, tx_duration_sec)
 
-        # Create a matching transaction event
-        transaction_duration = tx_duration_sec  # In seconds
+        # Create the transaction event FIRST
+        # IMPORTANT: This needs to be a properly structured transaction event
+        transaction_end_timestamp = transaction_timestamp + transaction_duration
         transaction_event = {
             "event_id": event_id,
             "type": "transaction",
             "transaction": f"synthetic-transaction-{idx}",
             "platform": PLATFORM,  # Override to target platform
-            "timestamp": datetime.fromtimestamp(
-                transaction_timestamp, tz=timezone.utc
-            ).isoformat(),
-            "start_timestamp": datetime.fromtimestamp(
-                transaction_timestamp, tz=timezone.utc
-            ).isoformat(),
+            "start_timestamp": transaction_timestamp,
+            "timestamp": transaction_end_timestamp,
             # Add all the expected transaction fields
             "contexts": {
                 "trace": {
@@ -1803,29 +1730,25 @@ def generate_direct_transaction_profiles():
                 "synthetic": "true",
                 "profile_type": "transaction",  # Explicitly mark as transaction profiling
                 "mock_duration_hours": str(MOCK_DURATION_HOURS),
-                "ui_profile_test": PLATFORM
-                in UI_PLATFORMS,  # Only true for UI platforms
-                "is_ui_platform": PLATFORM
-                in UI_PLATFORMS,  # Explicit tag for platform type
+                "ui_profile_test": PLATFORM in UI_PLATFORMS,
+                "is_ui_platform": PLATFORM in UI_PLATFORMS,
                 "platform_override": PLATFORM,
                 "original_platform": "python",
-                "test_run_id": str(uuid.uuid4())[:8],  # Add unique test run ID
+                "test_run_id": str(uuid.uuid4())[:8],
                 "profile_id": profile_id,  # Add direct reference to profile ID
                 "direct_generation": "true",
                 "mock_timestamps": "past",  # Indicate we're using past timestamps
-                "past_timestamp_base": datetime.fromtimestamp(
-                    base_timestamp, tz=timezone.utc
-                ).isoformat(),
             },
             # Add some spans for realism
             "spans": [
                 {
                     "span_id": uuid.uuid4().hex[:16],
-                    "parent_span_id": trace_id,
-                    "start_timestamp": transaction_timestamp,
+                    "parent_span_id": None,
+                    "start_timestamp": transaction_timestamp + (transaction_duration * 0.1),
                     "timestamp": transaction_timestamp + (transaction_duration * 0.5),
                     "description": "Synthetic child span",
                     "op": "child-operation",
+                    "status": "ok",
                 }
             ],
             "measurements": {
@@ -1836,17 +1759,66 @@ def generate_direct_transaction_profiles():
             },
         }
 
+        # Now create the profile payload with proper references to the transaction
+        profile_payload = {
+            "event_id": profile_id,
+            "platform": PLATFORM,  # Override to target platform
+            "profile": processed_profile,
+            "version": "1",
+            "transaction": f"synthetic-transaction-{idx}",  # Match transaction name
+            # Add fields that transaction profiling normally includes
+            "timestamp": transaction_timestamp,
+            "release": client.options.get("release", ""),
+            "environment": client.options.get("environment"),
+            # For transaction profiles, we need to reference the transaction
+            "transactions": [
+                {
+                    "id": event_id,  # Must match the transaction event_id
+                    "trace_id": trace_id,  # Must match the transaction trace_id
+                    "name": f"synthetic-transaction-{idx}",
+                    "active_thread_id": str(threading.get_ident()),
+                    "relative_start_ns": "0",
+                    # This is the critical field for mocking long durations
+                    # Set it to simulate a long-running transaction (in nanoseconds)
+                    "relative_end_ns": str(
+                        int(MOCK_DURATION_HOURS * 3600 * 1_000_000_000 / transactions_to_generate)
+                    ),
+                }
+            ],
+            # Device/OS/runtime info
+            "device": {
+                "architecture": platform.machine(),
+            },
+            "os": {
+                "name": platform.system(),
+                "version": platform.release(),
+            },
+            "runtime": {
+                "name": platform.python_implementation(),
+                "version": platform.python_version(),
+            },
+            # Add tags for searchability in Sentry UI
+            "tags": {
+                "profile_type": "transaction",
+                "ui_profile_test": PLATFORM in UI_PLATFORMS,
+                "is_ui_platform": PLATFORM in UI_PLATFORMS,
+                "synthetic": "true",
+                "direct_generation": "true",
+                "mock_duration_hours": str(MOCK_DURATION_HOURS),
+                "platform_override": PLATFORM,
+                "transaction_id": event_id,  # Reference to the transaction
+            },
+        }
+
         # Create an envelope with both the transaction and its profile
         envelope = Envelope()
 
-        # IMPORTANT: Add profile FIRST, then transaction
-        # This ensures Relay processes them in the correct order
-        # Add the profile first
+        # CRITICAL: Order matters! Add profile first, then transaction
         envelope.add_item(
             Item(
                 payload=PayloadRef(json=profile_payload),
                 type="profile",
-                headers={"platform": PLATFORM},  # Critical for UI profile hours
+                headers={"platform": PLATFORM},
             )
         )
 
@@ -1855,7 +1827,7 @@ def generate_direct_transaction_profiles():
             Item(
                 payload=PayloadRef(json=transaction_event),
                 type="transaction",
-                headers={"platform": PLATFORM},  # Set platform in headers
+                headers={"platform": PLATFORM},
             )
         )
 
