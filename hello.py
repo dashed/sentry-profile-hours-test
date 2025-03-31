@@ -90,6 +90,140 @@ AVAILABLE_DSNS = {
     "profile-hours-am3-business": "https://e3be3e9fd4c48a23b3a65ec2e62743d1@o4508486299942912.ingest.de.sentry.io/4508486300729424",
 }
 
+# === PROFILING MODE CONFIGURATION ===
+#
+# PROFILE_TYPE determines which of Sentry's two profiling modes to use:
+#
+# 1. "transaction" - Transaction-based profiling:
+#    - Profiles only code executed during transactions (between startTransaction and transaction.finish)
+#    - Limited to 30 seconds maximum duration per profile
+#    - Lower overhead as profiling only runs during transactions
+#    - Timestamps are represented as nanosecond offsets from transaction start
+#    - Configured via profiles_sample_rate in the SDK
+#    - In AM3 plans, these still contribute to profile hours based on platform
+#
+# 2. "continuous" - Continuous profiling:
+#    - Profiles your entire application continuously
+#    - No duration limits - can profile for hours/days
+#    - Higher overhead since profiler is always running
+#    - Timestamps are absolute Unix timestamps (seconds since epoch)
+#    - Configured via profile_session_sample_rate in the SDK
+#    - Explicitly controlled with start_profiler() and stop_profiler()
+#    - Sends regular "profile chunks" approximately every 60 seconds
+#
+# NOTE: These profiling modes cannot be used simultaneously in the same SDK initialization.
+# Options: "continuous" or "transaction"
+PROFILE_TYPE = "transaction"
+
+# PLATFORM determines how Relay and Sentry categorize profiles for billing purposes:
+#
+# - UI Platforms ("javascript", "android", "cocoa"):
+#   Counted as UI profile hours (typically higher cost in billing)
+#
+# - Backend Platforms ("python", "java", "node", etc.):
+#   Counted as backend profile hours
+#
+# This script forces the platform to the value specified here, regardless of
+# the actual platform the code runs on (Python).
+# Options: "javascript", "android", "cocoa" (for UI profiles)
+PLATFORM = "javascript"
+
+# === TIMESTAMP MOCKING CONFIGURATION ===
+#
+# MOCK_TIMESTAMPS enables simulating longer profiling durations in standard profiling mode.
+# This option only affects standard SDK profiling (when DIRECT_CHUNK_GENERATION is False):
+#
+# - When enabled: Profile timestamps are manipulated to appear spread across MOCK_DURATION_HOURS
+#   without needing to run the process for that entire time.
+#
+# - When disabled: Real timestamps from actual execution are used, meaning you'd need to
+#   run the process for the entire duration you want to test.
+#
+# When using DIRECT_CHUNK_GENERATION, timestamps are always mocked based on MOCK_DURATION_HOURS,
+# and this setting is ignored.
+#
+# For transaction profiling: This extends the relative_end_ns of transactions
+# For continuous profiling: This spreads samples across multiple 60-second windows
+# Set to True to mock longer profiles in standard profiling mode
+MOCK_TIMESTAMPS = False
+
+# MOCK_DURATION_HOURS is defined at the top of the file as a primary configuration option.
+
+# MOCK_SAMPLES_PER_HOUR controls the density of samples when MOCK_TIMESTAMPS is enabled.
+# Higher values create more detailed profiles but increase payload size.
+# For most testing purposes, the default is sufficient.
+MOCK_SAMPLES_PER_HOUR = 3600  # How many samples per hour to generate (if mocking)
+
+# === ADVANCED PROFILE GENERATION OPTIONS ===
+#
+# DIRECT_CHUNK_GENERATION enables the ultra-fast profile generation mode:
+#
+# - When enabled:
+#   * Completely bypasses the SDK's normal profiling mechanisms
+#   * Creates and sends profile chunks directly to Sentry
+#   * Achieves extremely high generation rates (60+ hours of data per second)
+#   * Use this for generating large amounts of profile data quickly
+#
+# - When disabled:
+#   * Uses the standard SDK profiling mechanisms with patches
+#   * More closely simulates real SDK behavior
+#   * Much slower generation rate
+#
+# The direct chunk generation will automatically use MOCK_DURATION_HOURS to
+# determine how much profile data to generate and will create timestamps
+# spread across that duration.
+#
+# For billing tests where you need to generate many profile hours quickly, enable this option.
+# Set to True to generate chunks directly (bypasses profiler)
+DIRECT_CHUNK_GENERATION = True
+
+# SAMPLES_PER_CHUNK controls how many stack samples are included in each profile chunk
+# when using DIRECT_CHUNK_GENERATION mode.
+#
+# - Higher values: More detailed profiles but larger payload sizes
+# - Lower values: Smaller, more efficient payloads but less detailed
+#
+# For billing testing purposes, the default is adequate. Higher values might be
+# needed if you're testing visualization or specific profile data structures.
+SAMPLES_PER_CHUNK = (
+    20  # How many samples to include in each chunk for direct generation
+)
+
+# === DEBUGGING OPTIONS ===
+#
+# DEBUG_PROFILING controls the verbosity of output during profiling:
+#
+# - When enabled:
+#   * Prints detailed information about the profiling process
+#   * Shows sample counts, chunk generation progress, and platform details
+#   * Reports window coverage for continuous profiling
+#   * Reports profiling mode initialization details
+#
+# - When disabled:
+#   * Minimal output, reporting only critical errors
+#   * Useful for production-like testing scenarios
+#
+# For initial testing and troubleshooting, enable this option.
+# For generating large volumes of profile data, consider disabling to reduce console spam.
+DEBUG_PROFILING = True  # Set to True for verbose debugging info
+
+# MINIMUM_SAMPLES defines the minimum number of stack samples a profile must contain to be considered valid.
+# Each sample is a snapshot of what functions were being executed at a specific moment.
+#
+# By default, the Sentry SDK discards profiles with fewer than PROFILE_MINIMUM_SAMPLES
+# (typically 2-5 depending on SDK version).
+#
+# This script overrides the normal behavior by:
+# 1. Checking for profiles with fewer than MINIMUM_SAMPLES
+# 2. Automatically adding synthetic samples to ensure profiles meet this threshold
+# 3. Ensuring no profiles are discarded due to insufficient samples
+#
+# Setting a higher value means more detailed profiles, but potentially more overhead.
+# Setting a lower value ensures almost all profiles are sent, but might include less useful profiles.
+# The default (3) is a good balance that ensures profiles have enough data to be meaningful
+# while not requiring excessive CPU work in the mock-timestamp mode.
+MINIMUM_SAMPLES = 3  # Minimum number of samples to ensure are collected
+
 # === PRESET IMPLEMENTATION ===
 # This code applies the settings based on the selected preset
 # It runs before the rest of the script and overrides relevant settings
@@ -257,139 +391,6 @@ def apply_preset():
 if PRESET != "DISABLED":
     apply_preset()
 
-# === PROFILING MODE CONFIGURATION ===
-#
-# PROFILE_TYPE determines which of Sentry's two profiling modes to use:
-#
-# 1. "transaction" - Transaction-based profiling:
-#    - Profiles only code executed during transactions (between startTransaction and transaction.finish)
-#    - Limited to 30 seconds maximum duration per profile
-#    - Lower overhead as profiling only runs during transactions
-#    - Timestamps are represented as nanosecond offsets from transaction start
-#    - Configured via profiles_sample_rate in the SDK
-#    - In AM3 plans, these still contribute to profile hours based on platform
-#
-# 2. "continuous" - Continuous profiling:
-#    - Profiles your entire application continuously
-#    - No duration limits - can profile for hours/days
-#    - Higher overhead since profiler is always running
-#    - Timestamps are absolute Unix timestamps (seconds since epoch)
-#    - Configured via profile_session_sample_rate in the SDK
-#    - Explicitly controlled with start_profiler() and stop_profiler()
-#    - Sends regular "profile chunks" approximately every 60 seconds
-#
-# NOTE: These profiling modes cannot be used simultaneously in the same SDK initialization.
-# Options: "continuous" or "transaction"
-PROFILE_TYPE = "transaction"
-
-# PLATFORM determines how Relay and Sentry categorize profiles for billing purposes:
-#
-# - UI Platforms ("javascript", "android", "cocoa"):
-#   Counted as UI profile hours (typically higher cost in billing)
-#
-# - Backend Platforms ("python", "java", "node", etc.):
-#   Counted as backend profile hours
-#
-# This script forces the platform to the value specified here, regardless of
-# the actual platform the code runs on (Python).
-# Options: "javascript", "android", "cocoa" (for UI profiles)
-PLATFORM = "javascript"
-
-# === TIMESTAMP MOCKING CONFIGURATION ===
-#
-# MOCK_TIMESTAMPS enables simulating longer profiling durations in standard profiling mode.
-# This option only affects standard SDK profiling (when DIRECT_CHUNK_GENERATION is False):
-#
-# - When enabled: Profile timestamps are manipulated to appear spread across MOCK_DURATION_HOURS
-#   without needing to run the process for that entire time.
-#
-# - When disabled: Real timestamps from actual execution are used, meaning you'd need to
-#   run the process for the entire duration you want to test.
-#
-# When using DIRECT_CHUNK_GENERATION, timestamps are always mocked based on MOCK_DURATION_HOURS,
-# and this setting is ignored.
-#
-# For transaction profiling: This extends the relative_end_ns of transactions
-# For continuous profiling: This spreads samples across multiple 60-second windows
-# Set to True to mock longer profiles in standard profiling mode
-MOCK_TIMESTAMPS = False
-
-# MOCK_DURATION_HOURS is defined at the top of the file as a primary configuration option.
-
-# MOCK_SAMPLES_PER_HOUR controls the density of samples when MOCK_TIMESTAMPS is enabled.
-# Higher values create more detailed profiles but increase payload size.
-# For most testing purposes, the default is sufficient.
-MOCK_SAMPLES_PER_HOUR = 3600  # How many samples per hour to generate (if mocking)
-
-# === ADVANCED PROFILE GENERATION OPTIONS ===
-#
-# DIRECT_CHUNK_GENERATION enables the ultra-fast profile generation mode:
-#
-# - When enabled:
-#   * Completely bypasses the SDK's normal profiling mechanisms
-#   * Creates and sends profile chunks directly to Sentry
-#   * Achieves extremely high generation rates (60+ hours of data per second)
-#   * Use this for generating large amounts of profile data quickly
-#
-# - When disabled:
-#   * Uses the standard SDK profiling mechanisms with patches
-#   * More closely simulates real SDK behavior
-#   * Much slower generation rate
-#
-# The direct chunk generation will automatically use MOCK_DURATION_HOURS to
-# determine how much profile data to generate and will create timestamps
-# spread across that duration.
-#
-# For billing tests where you need to generate many profile hours quickly, enable this option.
-# Set to True to generate chunks directly (bypasses profiler)
-DIRECT_CHUNK_GENERATION = True
-
-# SAMPLES_PER_CHUNK controls how many stack samples are included in each profile chunk
-# when using DIRECT_CHUNK_GENERATION mode.
-#
-# - Higher values: More detailed profiles but larger payload sizes
-# - Lower values: Smaller, more efficient payloads but less detailed
-#
-# For billing testing purposes, the default is adequate. Higher values might be
-# needed if you're testing visualization or specific profile data structures.
-SAMPLES_PER_CHUNK = (
-    20  # How many samples to include in each chunk for direct generation
-)
-
-# === DEBUGGING OPTIONS ===
-#
-# DEBUG_PROFILING controls the verbosity of output during profiling:
-#
-# - When enabled:
-#   * Prints detailed information about the profiling process
-#   * Shows sample counts, chunk generation progress, and platform details
-#   * Reports window coverage for continuous profiling
-#   * Reports profiling mode initialization details
-#
-# - When disabled:
-#   * Minimal output, reporting only critical errors
-#   * Useful for production-like testing scenarios
-#
-# For initial testing and troubleshooting, enable this option.
-# For generating large volumes of profile data, consider disabling to reduce console spam.
-DEBUG_PROFILING = True  # Set to True for verbose debugging info
-
-# MINIMUM_SAMPLES defines the minimum number of stack samples a profile must contain to be considered valid.
-# Each sample is a snapshot of what functions were being executed at a specific moment.
-#
-# By default, the Sentry SDK discards profiles with fewer than PROFILE_MINIMUM_SAMPLES
-# (typically 2-5 depending on SDK version).
-#
-# This script overrides the normal behavior by:
-# 1. Checking for profiles with fewer than MINIMUM_SAMPLES
-# 2. Automatically adding synthetic samples to ensure profiles meet this threshold
-# 3. Ensuring no profiles are discarded due to insufficient samples
-#
-# Setting a higher value means more detailed profiles, but potentially more overhead.
-# Setting a lower value ensures almost all profiles are sent, but might include less useful profiles.
-# The default (3) is a good balance that ensures profiles have enough data to be meaningful
-# while not requiring excessive CPU work in the mock-timestamp mode.
-MINIMUM_SAMPLES = 3  # Minimum number of samples to ensure are collected
 
 # ----------------------- IMPLEMENTATION -----------------------
 try:
