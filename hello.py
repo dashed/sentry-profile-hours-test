@@ -11,21 +11,17 @@ from sentry_sdk.profiler.continuous_profiler import ProfileBuffer, ProfileChunk
 
 # ----------------------- CONFIGURATION OPTIONS -----------------------
 
-# Dictionary of available DSNs - add new ones here
-AVAILABLE_DSNS = {
-    "profile-hours-am2-business": "https://b700116ce3eadd661071ad84ed45028b@o4508486249218048.ingest.us.sentry.io/4508486249938944",
-    "profile-hours-am3-business": "https://e3be3e9fd4c48a23b3a65ec2e62743d1@o4508486299942912.ingest.de.sentry.io/4508486300729424",
-}
+# === PRIMARY CONFIGURATION ===
+# These are the main settings you'll want to modify for most testing scenarios
 
-# The DSN to use for this run - can be overridden by presets
-SELECTED_DSN = "profile-hours-am3-business"  # Default to AM3 plan
+# Choose a preset from the list below or use "CUSTOM" or "DISABLED"
+PRESET = "DIRECT_AM3_TRANSACTION_UI"
 
-# Define which platforms are considered UI platforms
-# These platforms get categorized as UI profile hours rather than backend profile hours
-# See relay-profiling/src/lib.rs:ProfileChunk::profile_type() for the canonical Relay source
-UI_PLATFORMS = ("javascript", "android", "cocoa")
+# How many hours of profile data to generate (used by all modes)
+# This directly correlates to billable profile hours
+MOCK_DURATION_HOURS = 1.0
 
-# === PROFILE HOUR TESTING PRESETS ===
+# === PRESET INFORMATION ===
 #
 # Set the PRESET variable to quickly switch between different testing configurations.
 # Each preset configures PROFILE_TYPE, PLATFORM, DIRECT_CHUNK_GENERATION, and DSN for you.
@@ -67,17 +63,32 @@ UI_PLATFORMS = ("javascript", "android", "cocoa")
 # - AM2 plans: Have separate billing for transaction profiling and profile hours
 # - AM3 plans: All profiling billed as profile hours (transactions converted automatically)
 
-PRESET = "DIRECT_AM3_TRANSACTION_UI"  # Choose a preset from the list above or "CUSTOM" or "DISABLED"
-
 # === CUSTOM CONFIGURATION ===
 # These settings are used when PRESET is set to "CUSTOM" or "DISABLED"
 # When using a preset, these settings are overridden by the preset's values
 
-# The profiling mode to use (transaction or continuous)
+# The profiling mode to use: "transaction" or "continuous"
 PROFILE_TYPE = "transaction"
+
+# Platform to simulate: "javascript", "android", "cocoa" for UI profiles, "python" for backend
 PLATFORM = "javascript"
+
+# Enable direct generation mode for ultra-fast profile creation
 DIRECT_CHUNK_GENERATION = True
+
+# Which DSN to use (from AVAILABLE_DSNS below)
 SELECTED_DSN = "profile-hours-am3-business"
+
+# Define which platforms are considered UI platforms
+# These platforms get categorized as UI profile hours rather than backend profile hours
+# See relay-profiling/src/lib.rs:ProfileChunk::profile_type() for the canonical Relay source
+UI_PLATFORMS = ("javascript", "android", "cocoa")
+
+# Dictionary of available DSNs - add new ones here
+AVAILABLE_DSNS = {
+    "profile-hours-am2-business": "https://b700116ce3eadd661071ad84ed45028b@o4508486249218048.ingest.us.sentry.io/4508486249938944",
+    "profile-hours-am3-business": "https://e3be3e9fd4c48a23b3a65ec2e62743d1@o4508486299942912.ingest.de.sentry.io/4508486300729424",
+}
 
 # === PRESET IMPLEMENTATION ===
 # This code applies the settings based on the selected preset
@@ -303,17 +314,7 @@ PLATFORM = "javascript"
 # Set to True to mock longer profiles in standard profiling mode
 MOCK_TIMESTAMPS = False
 
-# MOCK_DURATION_HOURS sets how many hours of profiling data to simulate.
-# This controls:
-# - How many chunks are generated in direct generation mode (approximately 60 per hour)
-# - The effective duration of profiles when using timestamp mocking
-# - The total billable profile hours that will be generated
-#
-# This setting is used by both direct generation and standard profiling with MOCK_TIMESTAMPS.
-#
-# NOTE: In AM3 plans, this directly correlates to the number of profile hours
-# that will be counted for billing purposes.
-MOCK_DURATION_HOURS = 1.0  # How many hours to simulate for each profile session
+# MOCK_DURATION_HOURS is defined at the top of the file as a primary configuration option.
 
 # MOCK_SAMPLES_PER_HOUR controls the density of samples when MOCK_TIMESTAMPS is enabled.
 # Higher values create more detailed profiles but increase payload size.
