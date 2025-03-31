@@ -14,13 +14,6 @@ from sentry_sdk.profiler.continuous_profiler import ProfileBuffer, ProfileChunk
 # === PRIMARY CONFIGURATION ===
 # These are the main settings you'll want to modify for most testing scenarios
 
-# Choose a preset from the list below or use "CUSTOM" or "DISABLED"
-PRESET = "DIRECT_AM3_TRANSACTION_UI"
-
-# How many hours of profile data to generate (used by all modes)
-# This directly correlates to billable profile hours
-MOCK_DURATION_HOURS = 1.0
-
 # === PRESET INFORMATION ===
 #
 # Set the PRESET variable to quickly switch between different testing configurations.
@@ -66,29 +59,8 @@ MOCK_DURATION_HOURS = 1.0
 # === CUSTOM CONFIGURATION ===
 # These settings are used when PRESET is set to "CUSTOM" or "DISABLED"
 # When using a preset, these settings are overridden by the preset's values
-
-# The profiling mode to use: "transaction" or "continuous"
-PROFILE_TYPE = "transaction"
-
-# Platform to simulate: "javascript", "android", "cocoa" for UI profiles, "python" for backend
-PLATFORM = "javascript"
-
-# Enable direct generation mode for ultra-fast profile creation
-DIRECT_CHUNK_GENERATION = True
-
-# Which DSN to use (from AVAILABLE_DSNS below)
-SELECTED_DSN = "profile-hours-am3-business"
-
-# Define which platforms are considered UI platforms
-# These platforms get categorized as UI profile hours rather than backend profile hours
-# See relay-profiling/src/lib.rs:ProfileChunk::profile_type() for the canonical Relay source
-UI_PLATFORMS = ("javascript", "android", "cocoa")
-
-# Dictionary of available DSNs - add new ones here
-AVAILABLE_DSNS = {
-    "profile-hours-am2-business": "https://b700116ce3eadd661071ad84ed45028b@o4508486249218048.ingest.us.sentry.io/4508486249938944",
-    "profile-hours-am3-business": "https://e3be3e9fd4c48a23b3a65ec2e62743d1@o4508486299942912.ingest.de.sentry.io/4508486300729424",
-}
+# Choose a preset from the list above or use "CUSTOM" or "DISABLED"
+PRESET = "DISABLED"
 
 # === PROFILING MODE CONFIGURATION ===
 #
@@ -128,6 +100,20 @@ PROFILE_TYPE = "transaction"
 # Options: "javascript", "android", "cocoa" (for UI profiles)
 PLATFORM = "javascript"
 
+# Which DSN to use (from AVAILABLE_DSNS below)
+SELECTED_DSN = "profile-hours-am3-business"
+
+# Define which platforms are considered UI platforms
+# These platforms get categorized as UI profile hours rather than backend profile hours
+# See relay-profiling/src/lib.rs:ProfileChunk::profile_type() for the canonical Relay source
+UI_PLATFORMS = ("javascript", "android", "cocoa")
+
+# Dictionary of available DSNs - add new ones here
+AVAILABLE_DSNS = {
+    "profile-hours-am2-business": "https://b700116ce3eadd661071ad84ed45028b@o4508486249218048.ingest.us.sentry.io/4508486249938944",
+    "profile-hours-am3-business": "https://e3be3e9fd4c48a23b3a65ec2e62743d1@o4508486299942912.ingest.de.sentry.io/4508486300729424",
+}
+
 # === TIMESTAMP MOCKING CONFIGURATION ===
 #
 # MOCK_TIMESTAMPS enables simulating longer profiling durations in standard profiling mode.
@@ -147,7 +133,9 @@ PLATFORM = "javascript"
 # Set to True to mock longer profiles in standard profiling mode
 MOCK_TIMESTAMPS = False
 
-# MOCK_DURATION_HOURS is defined at the top of the file as a primary configuration option.
+# How many hours of profile data to generate (used by all modes)
+# This directly correlates to billable profile hours
+MOCK_DURATION_HOURS = 10.0
 
 # MOCK_SAMPLES_PER_HOUR controls the density of samples when MOCK_TIMESTAMPS is enabled.
 # Higher values create more detailed profiles but increase payload size.
@@ -1543,141 +1531,157 @@ def generate_direct_transaction_profiles():
     """
     Generate transaction profiles using the actual SDK first, then capture the transport.
     This ensures we use real profile formats that Relay will accept.
-    
+
     This approach:
     1. Creates real transaction profiles using the standard SDK flow
     2. Captures these profiles to use as templates for correct formatting
     3. Generates many profiles based on these templates
     4. Sends them directly to the transport
-    
+
     This ensures we send exactly the format that Relay expects, since we're using
     the actual SDK to create the initial templates.
     """
-    print(f"\nGenerating {MOCK_DURATION_HOURS} hours of transaction profile data directly")
-    
+    print(
+        f"\nGenerating {MOCK_DURATION_HOURS} hours of transaction profile data directly"
+    )
+
     # Calculate how many transactions/profiles to generate
     # Each transaction will be valid (< 30s) but collectively they'll simulate longer durations
     transactions_to_generate = max(10, int(MOCK_DURATION_HOURS * 100))
-    
+
     print(f"Will generate {transactions_to_generate} transactions with profiles")
-    
+
     # Create a custom transport that captures envelopes instead of sending them
     captured_envelopes = []
-    
+
     class CapturingTransport:
         def capture_envelope(self, envelope):
             captured_envelopes.append(envelope)
             if DEBUG_PROFILING and len(captured_envelopes) % 10 == 0:
                 print(f"DEBUG: Captured {len(captured_envelopes)} envelopes")
-            
+
         def flush(self, timeout=None, callback=None):
             pass
-            
+
         def shutdown(self, timeout=None, callback=None):
             pass
-    
+
     # Save the original transport
     client = sentry_sdk.get_client()
     original_transport = client.transport
-    
+
     # Temporarily swap in our capturing transport
     client.transport = CapturingTransport()
-    
+
     print("Creating real transaction profiles to capture...")
-    
+
     # Generate some real transaction profiles to capture their format
     for i in range(3):
         # Create a normal transaction with profiling
-        with sentry_sdk.start_transaction(name=f"template-transaction-{i}") as transaction:
+        with sentry_sdk.start_transaction(
+            name=f"template-transaction-{i}"
+        ) as transaction:
             transaction.set_tag("platform_override", PLATFORM)
-            
+
             # Add some spans to make it realistic
             with Span(op="child-operation", description="test-child-span"):
                 # Run a CPU task to generate profile samples
                 cpu_intensive_task(duration_ms=200)
-    
+
     # Restore the original transport
     client.transport = original_transport
-    
+
     # Make sure we captured at least one envelope
     if not captured_envelopes:
-        print("ERROR: Failed to capture any envelopes. Falling back to standard profiling.")
+        print(
+            "ERROR: Failed to capture any envelopes. Falling back to standard profiling."
+        )
         return run_transaction_profile_test()
-        
-    print(f"Captured {len(captured_envelopes)} envelopes with real transaction profiles")
-    
+
+    print(
+        f"Captured {len(captured_envelopes)} envelopes with real transaction profiles"
+    )
+
     # Extract the template transaction and profile
     template_envelope = None
     template_transaction = None
     template_profile = None
-    
+
     # Find the first envelope containing both a transaction and profile
     for envelope in captured_envelopes:
         has_transaction = False
         has_profile = False
-        
+
         # Check if this envelope has both transaction and profile
         for item in envelope:
             if item.type == "transaction":
                 has_transaction = True
             elif item.type == "profile":
                 has_profile = True
-                
+
         if has_transaction and has_profile:
             template_envelope = envelope
             break
-    
+
     if not template_envelope:
-        print("ERROR: Couldn't find an envelope with both transaction and profile. Falling back to standard profiling.")
+        print(
+            "ERROR: Couldn't find an envelope with both transaction and profile. Falling back to standard profiling."
+        )
         return run_transaction_profile_test()
-    
+
     # Extract transaction and profile from template envelope
     for item in template_envelope:
         if item.type == "transaction":
             template_transaction = item.payload.json
         elif item.type == "profile":
             template_profile = item.payload.json
-    
+
     if not template_transaction or not template_profile:
-        print("ERROR: Couldn't extract transaction and profile templates. Falling back to standard profiling.")
+        print(
+            "ERROR: Couldn't extract transaction and profile templates. Falling back to standard profiling."
+        )
         return run_transaction_profile_test()
-    
+
     print("Successfully extracted template transaction and profile")
     print(f"Transaction template keys: {list(template_transaction.keys())}")
     print(f"Profile template keys: {list(template_profile.keys())}")
-    
+
     # Extract critical profile structure information to ensure valid profiles
     has_profile_frames = "frames" in template_profile.get("profile", {})
     has_profile_stacks = "stacks" in template_profile.get("profile", {})
     has_profile_samples = "samples" in template_profile.get("profile", {})
-    
-    print(f"Profile has frames: {has_profile_frames}, stacks: {has_profile_stacks}, samples: {has_profile_samples}")
-    
+
+    print(
+        f"Profile has frames: {has_profile_frames}, stacks: {has_profile_stacks}, samples: {has_profile_samples}"
+    )
+
     # Now we can generate profiles using these templates
     # Get the actual transport capture function
     capture_func = None
     if hasattr(original_transport, "capture_envelope"):
         capture_func = original_transport.capture_envelope
-    
+
     if not capture_func:
-        print("ERROR: Could not access transport.capture_envelope. Falling back to standard profiling.")
+        print(
+            "ERROR: Could not access transport.capture_envelope. Falling back to standard profiling."
+        )
         return run_transaction_profile_test()
-    
+
     # Set up progress tracking
     start_time = time.time()
     last_report_time = start_time
     profiles_generated = 0
-    
+
     print("\nGenerating and sending transaction profiles based on real templates...")
-    
+
     # Time base - start timestamps from the past
     current_time = datetime.now(timezone.utc).timestamp()
     base_timestamp = current_time - (MOCK_DURATION_HOURS * 3600)
     hours_in_seconds = MOCK_DURATION_HOURS * 3600
-    
+
     # Track the total simulated profile duration
     total_profile_seconds = 0
-    
+
     # Generate transaction profiles based on templates
     for idx in range(transactions_to_generate):
         # Generate new IDs
@@ -1685,39 +1689,48 @@ def generate_direct_transaction_profiles():
         profile_id = uuid.uuid4().hex
         trace_id = uuid.uuid4().hex
         span_id = uuid.uuid4().hex[:16]
-        
+
         # Calculate timestamps - spread across the mock duration
         relative_position = idx / transactions_to_generate
         tx_timestamp = base_timestamp + (relative_position * hours_in_seconds)
-        
+
         # Use 20-second transactions to stay well under the 30-second limit
-        tx_duration = 20.0  
-        tx_start_time = datetime.fromtimestamp(tx_timestamp, tz=timezone.utc).isoformat()
-        tx_end_time = datetime.fromtimestamp(tx_timestamp + tx_duration, tz=timezone.utc).isoformat()
-        
+        tx_duration = 20.0
+        tx_start_time = datetime.fromtimestamp(
+            tx_timestamp, tz=timezone.utc
+        ).isoformat()
+        tx_end_time = datetime.fromtimestamp(
+            tx_timestamp + tx_duration, tz=timezone.utc
+        ).isoformat()
+
         # Use deep copies to avoid modifying the templates
         import copy
+
         tx_payload = copy.deepcopy(template_transaction)
         profile_payload = copy.deepcopy(template_profile)
-        
+
         # Update transaction payload with our new values
-        tx_payload.update({
-            "event_id": event_id,
-            "type": "transaction",
-            "transaction": f"synthetic-transaction-{idx}",
-            "start_timestamp": tx_start_time,
-            "timestamp": tx_end_time,
-            "platform": PLATFORM,
-        })
-        
+        tx_payload.update(
+            {
+                "event_id": event_id,
+                "type": "transaction",
+                "transaction": f"synthetic-transaction-{idx}",
+                "start_timestamp": tx_start_time,
+                "timestamp": tx_end_time,
+                "platform": PLATFORM,
+            }
+        )
+
         # Update trace context if it exists
         if "contexts" in tx_payload and "trace" in tx_payload["contexts"]:
-            tx_payload["contexts"]["trace"].update({
-                "trace_id": trace_id,
-                "span_id": span_id,
-                "op": "synthetic",
-                "status": "ok"
-            })
+            tx_payload["contexts"]["trace"].update(
+                {
+                    "trace_id": trace_id,
+                    "span_id": span_id,
+                    "op": "synthetic",
+                    "status": "ok",
+                }
+            )
         else:
             # Create trace context if it doesn't exist
             if "contexts" not in tx_payload:
@@ -1726,26 +1739,30 @@ def generate_direct_transaction_profiles():
                 "trace_id": trace_id,
                 "span_id": span_id,
                 "op": "synthetic",
-                "status": "ok"
+                "status": "ok",
             }
-        
+
         # Add tags for identification
         if "tags" not in tx_payload:
             tx_payload["tags"] = {}
-        tx_payload["tags"].update({
-            "synthetic": "true",
-            "ui_profile_test": PLATFORM in UI_PLATFORMS,
-            "platform_override": PLATFORM,
-            "mock_duration_hours": str(MOCK_DURATION_HOURS)
-        })
-        
+        tx_payload["tags"].update(
+            {
+                "synthetic": "true",
+                "ui_profile_test": PLATFORM in UI_PLATFORMS,
+                "platform_override": PLATFORM,
+                "mock_duration_hours": str(MOCK_DURATION_HOURS),
+            }
+        )
+
         # Update profile payload with our new values
-        profile_payload.update({
-            "event_id": profile_id,
-            "platform": PLATFORM,
-            "timestamp": tx_start_time,
-        })
-        
+        profile_payload.update(
+            {
+                "event_id": profile_id,
+                "platform": PLATFORM,
+                "timestamp": tx_start_time,
+            }
+        )
+
         # Update transactions list in profile
         if "transactions" in profile_payload:
             # If transactions list exists, update it
@@ -1755,97 +1772,113 @@ def generate_direct_transaction_profiles():
                     "id": event_id,
                     "name": f"synthetic-transaction-{idx}",
                     "trace_id": trace_id,
-                    "active_thread_id": profile_payload["transactions"][0].get("active_thread_id", str(threading.get_ident())),
+                    "active_thread_id": profile_payload["transactions"][0].get(
+                        "active_thread_id", str(threading.get_ident())
+                    ),
                     "relative_start_ns": "0",
-                    "relative_end_ns": str(int(tx_duration * 1_000_000_000))
+                    "relative_end_ns": str(int(tx_duration * 1_000_000_000)),
                 }
-                
+
                 # Remove any extra transactions
                 if len(profile_payload["transactions"]) > 1:
-                    profile_payload["transactions"] = [profile_payload["transactions"][0]]
+                    profile_payload["transactions"] = [
+                        profile_payload["transactions"][0]
+                    ]
             else:
                 # Add a transaction if the list is empty
-                profile_payload["transactions"] = [{
+                profile_payload["transactions"] = [
+                    {
+                        "id": event_id,
+                        "name": f"synthetic-transaction-{idx}",
+                        "trace_id": trace_id,
+                        "active_thread_id": str(threading.get_ident()),
+                        "relative_start_ns": "0",
+                        "relative_end_ns": str(int(tx_duration * 1_000_000_000)),
+                    }
+                ]
+        else:
+            # Create transactions list if it doesn't exist
+            profile_payload["transactions"] = [
+                {
                     "id": event_id,
                     "name": f"synthetic-transaction-{idx}",
                     "trace_id": trace_id,
                     "active_thread_id": str(threading.get_ident()),
                     "relative_start_ns": "0",
-                    "relative_end_ns": str(int(tx_duration * 1_000_000_000))
-                }]
-        else:
-            # Create transactions list if it doesn't exist
-            profile_payload["transactions"] = [{
-                "id": event_id,
-                "name": f"synthetic-transaction-{idx}",
-                "trace_id": trace_id,
-                "active_thread_id": str(threading.get_ident()),
-                "relative_start_ns": "0",
-                "relative_end_ns": str(int(tx_duration * 1_000_000_000))
-            }]
-        
+                    "relative_end_ns": str(int(tx_duration * 1_000_000_000)),
+                }
+            ]
+
         # CRITICAL FIX: Ensure all sample timestamps are string representations
         if "profile" in profile_payload and "samples" in profile_payload["profile"]:
             for sample in profile_payload["profile"]["samples"]:
-                if "elapsed_since_start_ns" in sample and not isinstance(sample["elapsed_since_start_ns"], str):
-                    sample["elapsed_since_start_ns"] = str(sample["elapsed_since_start_ns"])
-        
+                if "elapsed_since_start_ns" in sample and not isinstance(
+                    sample["elapsed_since_start_ns"], str
+                ):
+                    sample["elapsed_since_start_ns"] = str(
+                        sample["elapsed_since_start_ns"]
+                    )
+
         # Create an envelope using the real SDK's envelope structure
         envelope = Envelope()
-        
+
         # Always add transaction first, then profile - this order is critical
         envelope.add_item(
             Item(
                 payload=PayloadRef(json=tx_payload),
                 type="transaction",
-                headers={"platform": PLATFORM}
+                headers={"platform": PLATFORM},
             )
         )
-        
+
         envelope.add_item(
             Item(
                 payload=PayloadRef(json=profile_payload),
                 type="profile",
-                headers={"platform": PLATFORM}
+                headers={"platform": PLATFORM},
             )
         )
-        
+
         # Send the envelope
         capture_func(envelope)
-        
+
         # Update tracking
         profiles_generated += 1
         total_profile_seconds += tx_duration
-        
+
         # Report progress periodically
         current_time = time.time()
-        if (current_time - last_report_time) >= 0.5 or profiles_generated == transactions_to_generate:
+        if (
+            current_time - last_report_time
+        ) >= 0.5 or profiles_generated == transactions_to_generate:
             last_report_time = current_time
             elapsed = current_time - start_time
             progress = (profiles_generated / transactions_to_generate) * 100
-            
+
             # Calculate hours covered
             time_covered = total_profile_seconds / 3600
-            
+
             # Estimate completion time
             if profiles_generated > 0 and elapsed > 0:
                 profiles_per_second = profiles_generated / elapsed
                 remaining_profiles = transactions_to_generate - profiles_generated
                 estimated_remaining_seconds = (
-                    remaining_profiles / profiles_per_second if profiles_per_second > 0 else 0
+                    remaining_profiles / profiles_per_second
+                    if profiles_per_second > 0
+                    else 0
                 )
-                
+
                 print(
                     f"Progress: {profiles_generated}/{transactions_to_generate} profiles "
                     f"({progress:.1f}%, {time_covered:.2f} profile hours), "
                     f"Rate: {profiles_per_second:.1f} profiles/s, "
                     f"ETA: {estimated_remaining_seconds:.1f}s"
                 )
-    
+
     # Final report
     total_time = time.time() - start_time
     total_profile_hours = total_profile_seconds / 3600
-    
+
     print(
         f"\nGeneration complete: {profiles_generated} transaction profiles "
         f"generating {total_profile_hours:.2f} profile hours "
@@ -1856,11 +1889,12 @@ def generate_direct_transaction_profiles():
         f"({total_profile_hours / total_time:.2f} profile hours/second)"
     )
 
+
 def run_standard_profiling():
     """Run standard continuous profiling with real CPU tasks"""
     # Start the profiler
     sentry_sdk.profiler.start_profiler()
-    
+
     # Run a series of transactions with errors and CPU-intensive tasks
     for i in range(3):
         with sentry_sdk.start_transaction(name=f"test-transaction-{i}") as transaction:
@@ -1870,12 +1904,12 @@ def run_standard_profiling():
             transaction.set_tag("is_ui_platform", is_ui_platform)
             transaction.set_tag("profile_type", "continuous")
             transaction.set_tag("platform_override", PLATFORM)
-            
+
             # Run a CPU-intensive task
             duration_ms = 200 * (i + 1)
             print(f"Running CPU task {i+1}/3 (duration: {duration_ms}ms)...")
             cpu_intensive_task(duration_ms)
-    
+
     # For continuous profiling, let it run longer to collect more data
     for i in range(5):
         cpu_intensive_task(300)
