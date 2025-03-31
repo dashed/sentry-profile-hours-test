@@ -5,3 +5,6 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = ["sentry-sdk==2.24.1"]
+
+[tool.flake8]
+max-line-length = 120
