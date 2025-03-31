@@ -1704,26 +1704,30 @@ def generate_direct_transaction_profiles():
         # Ensure this is within Relay's validation limits (< 30 seconds)
         transaction_duration = min(25.0, tx_duration_sec)
 
-        # Create the transaction event FIRST
-        # IMPORTANT: This needs to be a properly structured transaction event
-        transaction_end_timestamp = transaction_timestamp + transaction_duration
+        # For transaction timestamp, we need ISO format strings
+        transaction_start_time = datetime.fromtimestamp(transaction_timestamp, tz=timezone.utc).isoformat()
+        transaction_end_time = datetime.fromtimestamp(transaction_timestamp + transaction_duration, tz=timezone.utc).isoformat()
+
+        # Generate span ID for the transaction
+        span_id = uuid.uuid4().hex[:16]
+
+        # Create the transaction event
         transaction_event = {
             "event_id": event_id,
             "type": "transaction",
             "transaction": f"synthetic-transaction-{idx}",
             "platform": PLATFORM,  # Override to target platform
-            "start_timestamp": transaction_timestamp,
-            "timestamp": transaction_end_timestamp,
+            "start_timestamp": transaction_start_time,
+            "timestamp": transaction_end_time,
             # Add all the expected transaction fields
             "contexts": {
                 "trace": {
                     "trace_id": trace_id,
-                    "span_id": uuid.uuid4().hex[:16],
+                    "span_id": span_id,
                     "op": "synthetic",
                     "status": "ok",
                 },
-                # IMPORTANT: Add profile context to link the transaction to its profile
-                "profile": {"profile_id": profile_id},
+                # IMPORTANT: We don't add profile context here - Relay adds it during processing
             },
             "tags": {
                 "transaction": f"synthetic-transaction-{idx}",
@@ -1735,7 +1739,6 @@ def generate_direct_transaction_profiles():
                 "platform_override": PLATFORM,
                 "original_platform": "python",
                 "test_run_id": str(uuid.uuid4())[:8],
-                "profile_id": profile_id,  # Add direct reference to profile ID
                 "direct_generation": "true",
                 "mock_timestamps": "past",  # Indicate we're using past timestamps
             },
@@ -1743,9 +1746,9 @@ def generate_direct_transaction_profiles():
             "spans": [
                 {
                     "span_id": uuid.uuid4().hex[:16],
-                    "parent_span_id": None,
-                    "start_timestamp": transaction_timestamp + (transaction_duration * 0.1),
-                    "timestamp": transaction_timestamp + (transaction_duration * 0.5),
+                    "parent_span_id": span_id,  # Must reference parent span ID
+                    "start_timestamp": transaction_start_time,
+                    "timestamp": transaction_end_time,
                     "description": "Synthetic child span",
                     "op": "child-operation",
                     "status": "ok",
@@ -1761,25 +1764,24 @@ def generate_direct_transaction_profiles():
 
         # Now create the profile payload with proper references to the transaction
         profile_payload = {
-            "event_id": profile_id,
-            "platform": PLATFORM,  # Override to target platform
+            "event_id": profile_id,  # Profile has its own unique ID
+            "platform": PLATFORM,
             "profile": processed_profile,
             "version": "1",
-            "transaction": f"synthetic-transaction-{idx}",  # Match transaction name
-            # Add fields that transaction profiling normally includes
-            "timestamp": transaction_timestamp,
+            # Use ISO timestamp format as string for profile timestamp
+            "timestamp": transaction_start_time,
             "release": client.options.get("release", ""),
             "environment": client.options.get("environment"),
             # For transaction profiles, we need to reference the transaction
             "transactions": [
                 {
-                    "id": event_id,  # Must match the transaction event_id
-                    "trace_id": trace_id,  # Must match the transaction trace_id
+                    "id": event_id,  # Must match the transaction event_id exactly
+                    "trace_id": trace_id,  # Must match the transaction trace context
                     "name": f"synthetic-transaction-{idx}",
                     "active_thread_id": str(threading.get_ident()),
                     "relative_start_ns": "0",
                     # This is the critical field for mocking long durations
-                    # Set it to simulate a long-running transaction (in nanoseconds)
+                    # IMPORTANT: Must be string format for nanoseconds
                     "relative_end_ns": str(
                         int(MOCK_DURATION_HOURS * 3600 * 1_000_000_000 / transactions_to_generate)
                     ),
@@ -1813,20 +1815,21 @@ def generate_direct_transaction_profiles():
         # Create an envelope with both the transaction and its profile
         envelope = Envelope()
 
-        # CRITICAL: Order matters! Add profile first, then transaction
-        envelope.add_item(
-            Item(
-                payload=PayloadRef(json=profile_payload),
-                type="profile",
-                headers={"platform": PLATFORM},
-            )
-        )
-
-        # Add the transaction second
+        # CRITICAL: Order matters! Transaction MUST come before profile in the envelope
+        # This is the opposite of what we had before
         envelope.add_item(
             Item(
                 payload=PayloadRef(json=transaction_event),
                 type="transaction",
+                headers={"platform": PLATFORM},
+            )
+        )
+
+        # Add the profile second
+        envelope.add_item(
+            Item(
+                payload=PayloadRef(json=profile_payload),
+                type="profile",
                 headers={"platform": PLATFORM},
             )
         )
