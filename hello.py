@@ -67,11 +67,17 @@ UI_PLATFORMS = ("javascript", "android", "cocoa")
 # - AM2 plans: Have separate billing for transaction profiling and profile hours
 # - AM3 plans: All profiling billed as profile hours (transactions converted automatically)
 
-PRESET = "DISABLED"  # Choose a preset from the list above or "CUSTOM" or "DISABLED"
+PRESET = "DIRECT_AM3_TRANSACTION_UI"  # Choose a preset from the list above or "CUSTOM" or "DISABLED"
 
 # === CUSTOM CONFIGURATION ===
 # These settings are used when PRESET is set to "CUSTOM" or "DISABLED"
 # When using a preset, these settings are overridden by the preset's values
+
+# The profiling mode to use (transaction or continuous)
+PROFILE_TYPE = "transaction"
+PLATFORM = "javascript"
+DIRECT_CHUNK_GENERATION = True
+SELECTED_DSN = "profile-hours-am3-business"
 
 # === PRESET IMPLEMENTATION ===
 # This code applies the settings based on the selected preset
@@ -335,7 +341,7 @@ MOCK_SAMPLES_PER_HOUR = 3600  # How many samples per hour to generate (if mockin
 #
 # For billing tests where you need to generate many profile hours quickly, enable this option.
 # Set to True to generate chunks directly (bypasses profiler)
-DIRECT_CHUNK_GENERATION = False
+DIRECT_CHUNK_GENERATION = True
 
 # SAMPLES_PER_CHUNK controls how many stack samples are included in each profile chunk
 # when using DIRECT_CHUNK_GENERATION mode.
@@ -1533,365 +1539,259 @@ def generate_direct_profile_chunks():
 
 def generate_direct_transaction_profiles():
     """
-    Generate and send transaction profiles directly without using the SDK's transaction mechanism.
-    This allows generating hours worth of transaction profile data in seconds.
-
-    Unlike continuous profiling which sends chunks regularly, transaction profiling attaches
-    profiles to transactions. This function creates synthetic transactions with attached profiles
-    that simulate lengthy durations.
-
-    IMPORTANT: Transaction profiles MUST be linked to a transaction event to be visible in Sentry.
-    This requires:
-    1. Adding the profile to the envelope BEFORE the transaction
-    2. Adding a "profile" context to the transaction that references the profile ID
-    3. Making sure the transaction ID in profile matches exactly the transaction event ID
-    4. Ensuring consistent timestamps between transaction and profile
-
-    TIMESTAMP APPROACH:
-    - All transactions are generated with timestamps in the past
-    - The base timestamp is set to (current_time - mock_duration_hours)
-    - Transactions are spread evenly across this past time window
-    - This approach avoids clock drift correction that might occur with future timestamps
-    - Each transaction has a timestamp in the past with the profile's relative timing preserved
+    Generate transaction profiles using the actual SDK first, then capture the transport.
+    This ensures we use real profile formats that Relay will accept.
+    
+    This approach:
+    1. Creates real transaction profiles using the standard SDK flow
+    2. Captures these profiles to use as templates for correct formatting
+    3. Generates many profiles based on these templates
+    4. Sends them directly to the transport
+    
+    This ensures we send exactly the format that Relay expects, since we're using
+    the actual SDK to create the initial templates.
     """
-    print(
-        f"\nGenerating {MOCK_DURATION_HOURS} hours of transaction profile data directly"
-    )
-
+    print(f"\nGenerating {MOCK_DURATION_HOURS} hours of transaction profile data directly")
+    
     # Calculate how many transactions/profiles to generate
-    # We'll create approximately 100 transactions per hour of profile time
     # Each transaction will be valid (< 30s) but collectively they'll simulate longer durations
     transactions_to_generate = max(10, int(MOCK_DURATION_HOURS * 100))
-
-    # Explain the timestamp approach being used
-    current_time = datetime.now(timezone.utc)
-    start_time = current_time - timedelta(hours=MOCK_DURATION_HOURS)
-    end_time = current_time
-
+    
     print(f"Will generate {transactions_to_generate} transactions with profiles")
-    print(f"Each profile will have approximately {SAMPLES_PER_CHUNK} samples")
-    print(
-        f"Using timestamps from the past: {start_time.isoformat()} to {end_time.isoformat()}"
-    )
-
-    # Indicate if this is a UI platform test or not
-    if PLATFORM in UI_PLATFORMS:
-        print(
-            f"Platform: {PLATFORM} (UI platform - will be counted as UI profile hours)"
-        )
-    else:
-        print(
-            f"Platform: {PLATFORM} (Backend platform - will be counted as backend profile hours)"
-        )
-
-    # Get the client and its options
+    
+    # Create a custom transport that captures envelopes instead of sending them
+    captured_envelopes = []
+    
+    class CapturingTransport:
+        def capture_envelope(self, envelope):
+            captured_envelopes.append(envelope)
+            if DEBUG_PROFILING and len(captured_envelopes) % 10 == 0:
+                print(f"DEBUG: Captured {len(captured_envelopes)} envelopes")
+            
+        def flush(self, timeout=None, callback=None):
+            pass
+            
+        def shutdown(self, timeout=None, callback=None):
+            pass
+    
+    # Save the original transport
     client = sentry_sdk.get_client()
-    if not client or not client.options:
-        print("ERROR: Could not access Sentry client or options")
-        return
-
-    # Get the capture function - this is what actually sends the envelope to Sentry
+    original_transport = client.transport
+    
+    # Temporarily swap in our capturing transport
+    client.transport = CapturingTransport()
+    
+    print("Creating real transaction profiles to capture...")
+    
+    # Generate some real transaction profiles to capture their format
+    for i in range(3):
+        # Create a normal transaction with profiling
+        with sentry_sdk.start_transaction(name=f"template-transaction-{i}") as transaction:
+            transaction.set_tag("platform_override", PLATFORM)
+            
+            # Add some spans to make it realistic
+            with Span(op="child-operation", description="test-child-span"):
+                # Run a CPU task to generate profile samples
+                cpu_intensive_task(duration_ms=200)
+    
+    # Restore the original transport
+    client.transport = original_transport
+    
+    # Make sure we captured at least one envelope
+    if not captured_envelopes:
+        print("ERROR: Failed to capture any envelopes. Falling back to standard profiling.")
+        return run_transaction_profile_test()
+        
+    print(f"Captured {len(captured_envelopes)} envelopes with real transaction profiles")
+    
+    # Extract the first transaction and profile as templates
+    template_envelope = captured_envelopes[0]
+    template_transaction = None
+    template_profile = None
+    
+    # Extract transaction and profile from template envelope
+    for item in template_envelope:
+        if item.type == "transaction":
+            template_transaction = item.payload.json
+        elif item.type == "profile":
+            template_profile = item.payload.json
+    
+    if not template_transaction or not template_profile:
+        print("ERROR: Couldn't extract transaction and profile templates. Falling back to standard profiling.")
+        return run_transaction_profile_test()
+    
+    print("Successfully extracted template transaction and profile")
+    
+    # Now we can generate profiles using these templates
+    # Get the actual transport capture function
     capture_func = None
-    if hasattr(client, "transport") and client.transport:
-        if hasattr(client.transport, "capture_envelope"):
-            capture_func = client.transport.capture_envelope
-
+    if hasattr(original_transport, "capture_envelope"):
+        capture_func = original_transport.capture_envelope
+    
     if not capture_func:
-        print("ERROR: Could not access capture_envelope function")
-        return
-
+        print("ERROR: Could not access transport.capture_envelope. Falling back to standard profiling.")
+        return run_transaction_profile_test()
+    
     # Set up progress tracking
     start_time = time.time()
     last_report_time = start_time
     profiles_generated = 0
-
-    print("\nGenerating and sending transaction profiles...")
-
-    # Time base for transactions - start from the past to avoid clock drift issues
+    
+    print("\nGenerating and sending transaction profiles based on real templates...")
+    
+    # Time base - start timestamps from the past
     current_time = datetime.now(timezone.utc).timestamp()
-    # Start from X hours in the past, where X is the mock duration
-    # This ensures all timestamps are in the past and none exceed current time
     base_timestamp = current_time - (MOCK_DURATION_HOURS * 3600)
-
-    # For transaction profiles, we'll distribute profiles across the mocked duration
     hours_in_seconds = MOCK_DURATION_HOURS * 3600
-
-    # Generate each transaction with profile
+    
+    # Track the total simulated profile duration
+    total_profile_seconds = 0
+    
+    # Generate transaction profiles based on templates
     for idx in range(transactions_to_generate):
-        # Generate unique IDs
+        # Generate new IDs
         event_id = uuid.uuid4().hex
-        trace_id = "".join(["{:02x}".format(random.randint(0, 255)) for _ in range(16)])
         profile_id = uuid.uuid4().hex
-
-        # Calculate where in the mocked duration this transaction fits
-        # Spread transactions evenly across the mocked duration - all in the past
-        relative_position = idx / transactions_to_generate
-        transaction_timestamp = base_timestamp + (relative_position * hours_in_seconds)
-
-        # Ensure the transaction timestamp doesn't exceed current time
-        # (should never happen with our base_timestamp calculation, but double-check)
-        current_time = datetime.now(timezone.utc).timestamp()
-        if transaction_timestamp > current_time:
-            print(
-                f"WARNING: Transaction timestamp {transaction_timestamp} is in the future! Adjusting to past."
-            )
-            transaction_timestamp = current_time - 60  # 1 minute in the past
-
-        # Create profile start timestamp - use actual transaction timestamp for consistency
-        profile_start_ns = int(
-            transaction_timestamp * 1_000_000_000
-        )  # Convert seconds to nanoseconds
-
-        # Calculate how long this profile should appear to run
-        # For transaction profiles, we can't exceed 30 seconds in reality
-        # But we can fake longer durations in the transaction metadata
-        # Maximum single-transaction duration should be less than what Relay validates (30 sec)
-        tx_duration_sec = min(25.0, hours_in_seconds / transactions_to_generate)
-
-        # For transaction profiles, instead of representing absolute timestamps,
-        # samples use nanosecond offsets from the start of the profile
-        samples = []
-        frames = []
-        stacks = []
-        indexed_frames = {}
-        indexed_stacks = {}
-
-        # Generate synthetic samples for this profile
-        for i in range(SAMPLES_PER_CHUNK):
-            # Create a synthetic sample with stack
-            tid, stack_data = generate_synthetic_profile_sample()[0]
-            stack_id, frame_ids, frame_objects = stack_data
-
-            # Calculate offset within the transaction duration (in nanoseconds)
-            # We need to spread samples throughout the profile - CRITICAL: Timestamp must be < 30s
-            # Explicitly cap each transaction to 25 seconds to be safe (Relay has 30s limit)
-            relative_offset = (i / SAMPLES_PER_CHUNK) * min(25.0, tx_duration_sec) * 1_000_000_000
-
-            # Create frame references (just like in Profile.write)
-            if stack_id not in indexed_stacks:
-                for j, frame_id in enumerate(frame_ids):
-                    if frame_id not in indexed_frames:
-                        indexed_frames[frame_id] = len(indexed_frames)
-                        frames.append(frame_objects[j])
-
-                indexed_stacks[stack_id] = len(indexed_stacks)
-                stacks.append([indexed_frames[frame_id] for frame_id in frame_ids])
-
-            # CRITICAL: Transaction profiles require string representation of nanosecond offsets
-            # Format exactly as SDK does - string representation of nanoseconds
-            samples.append(
-                {
-                    "elapsed_since_start_ns": str(int(relative_offset)),
-                    "thread_id": str(tid),
-                    "stack_id": indexed_stacks[stack_id]
-                }
-            )
-
-        # Get thread metadata
-        thread_metadata = {}
-        for thread in threading.enumerate():
-            thread_metadata[str(thread.ident)] = {
-                "name": str(thread.name),
-            }
-
-        # Create the processed profile
-        processed_profile = {
-            "frames": frames,
-            "stacks": stacks,
-            "samples": samples,
-            "thread_metadata": thread_metadata,
-        }
-
-        # IMPORTANT: Keep transaction duration within 30-second limit for transaction profiles
-        # This is enforced by Relay's MAX_PROFILE_DURATION (30 seconds)
-        # Real duration used for the event (must be < 30 seconds)
-        transaction_duration = min(25.0, tx_duration_sec)
-        
-        # For billing simulation, we need to create mock_duration that's much longer
-        # This will be used in the relative_end_ns field to simulate long profiles
-        mock_profile_duration = MOCK_DURATION_HOURS * 3600 / transactions_to_generate
-
-        # Generate span ID for the transaction
+        trace_id = uuid.uuid4().hex
         span_id = uuid.uuid4().hex[:16]
-
-        # Transaction timestamps MUST be ISO format strings
-        # For transaction events, the DSN expects ISO 8601 formatted timestamps
-        transaction_start_time = datetime.fromtimestamp(transaction_timestamp, tz=timezone.utc).isoformat()
-        transaction_end_time = datetime.fromtimestamp(transaction_timestamp + transaction_duration, tz=timezone.utc).isoformat()
         
-        # We'll generate many more transactions to simulate longer profile hours
-        # Instead of trying to hack a single transaction to cover hours, we generate multiple valid transactions
+        # Calculate timestamps - spread across the mock duration
+        relative_position = idx / transactions_to_generate
+        tx_timestamp = base_timestamp + (relative_position * hours_in_seconds)
         
-        # Create the transaction event - CRITICAL: Must match SDK format exactly
-        transaction_event = {
+        # Use 20-second transactions to stay well under the 30-second limit
+        tx_duration = 20.0  
+        tx_start_time = datetime.fromtimestamp(tx_timestamp, tz=timezone.utc).isoformat()
+        tx_end_time = datetime.fromtimestamp(tx_timestamp + tx_duration, tz=timezone.utc).isoformat()
+        
+        # Clone the template transaction with our new values
+        tx_payload = dict(template_transaction)
+        tx_payload.update({
             "event_id": event_id,
             "type": "transaction",
             "transaction": f"synthetic-transaction-{idx}",
-            "start_timestamp": transaction_start_time,
-            "timestamp": transaction_end_time,
+            "start_timestamp": tx_start_time,
+            "timestamp": tx_end_time,
             "platform": PLATFORM,
             "contexts": {
                 "trace": {
                     "trace_id": trace_id,
                     "span_id": span_id,
                     "op": "synthetic",
-                    "status": "ok",
-                },
-                # Don't add profile context - Relay will add it during processing
-            },
-            "spans": [
-                {
-                    "span_id": uuid.uuid4().hex[:16],
-                    "parent_span_id": span_id,
-                    "start_timestamp": transaction_start_time,
-                    "timestamp": transaction_end_time,
-                    "description": "Synthetic operation",
-                    "op": "http",
-                    "status": "ok",
+                    "status": "ok"
                 }
-            ],
-            "measurements": {
-                "fp": {
-                    "value": 123.45,
-                    "unit": "millisecond",
-                }
-            },
-            # Add only minimal tags that won't confuse Relay
-            "tags": {
-                "transaction": f"synthetic-transaction-{idx}",
             }
-        }
-
-        # Now create the profile payload according to SDK format
-        # Must match the structure from the SDK exactly - don't add extra fields
-        profile_payload = {
+        })
+        
+        # Clone the template profile with our new values
+        profile_payload = dict(template_profile)
+        profile_payload.update({
             "event_id": profile_id,
-            "version": "1",
             "platform": PLATFORM,
-            "timestamp": transaction_start_time,
-            # Optional release and environment
-            "release": client.options.get("release", ""),
-            "environment": client.options.get("environment"),
-            # The actual profile data
-            "profile": processed_profile,
-            # Required device information
-            "device": {
-                "architecture": platform.machine(),
-            },
-            "os": {
-                "name": platform.system(),
-                "version": platform.release(),
-            },
-            "runtime": {
-                "name": platform.python_implementation(),
-                "version": platform.python_version(),
-            },
-            # Critical transaction reference - must match transaction exactly
+            "timestamp": tx_start_time,
             "transactions": [
                 {
-                    "id": event_id,  # MUST match transaction event_id
-                    "trace_id": trace_id,  # MUST match transaction trace_id
-                    "name": f"synthetic-transaction-{idx}",  # MUST match transaction.transaction
+                    "id": event_id,
+                    "name": f"synthetic-transaction-{idx}",
+                    "trace_id": trace_id,
                     "active_thread_id": str(threading.get_ident()),
                     "relative_start_ns": "0",
-                    "relative_end_ns": str(int(transaction_duration * 1_000_000_000))
+                    "relative_end_ns": str(int(tx_duration * 1_000_000_000))
                 }
             ]
-            # NO tags - the SDK doesn't add them and they may confuse validation
-        }
-
-        # Create an envelope with both the transaction and its profile
+        })
+        
+        # Create an envelope using the real SDK's envelope structure
         envelope = Envelope()
-
-        # CRITICAL: Order matters! Transaction MUST come before profile in the envelope
+        
+        # Always add transaction first, then profile - this order is critical
         envelope.add_item(
             Item(
-                payload=PayloadRef(json=transaction_event),
+                payload=PayloadRef(json=tx_payload),
                 type="transaction",
-                headers={"platform": PLATFORM},
+                headers={"platform": PLATFORM}
             )
         )
-
-        # Important: Transaction profile max duration is 30 seconds
-        # We need to keep our real duration below this limit while simulating longer durations
-        # Do NOT modify the profile.transactions[0].relative_end_ns yet - let Relay validate it first
         
-        # Check and report the original profile duration for debugging
-        original_profile_duration_ns = int(profile_payload["transactions"][0]["relative_end_ns"])
-        if DEBUG_PROFILING:
-            print(f"DEBUG: Original profile duration: {original_profile_duration_ns/1_000_000_000:.2f}s")
-            
-        # We'll adjust the billing duration in backend API after Relay validates the profile
-        if MOCK_DURATION_HOURS > 0 and DEBUG_PROFILING:
-            # Calculate the simulated billing duration
-            mock_billing_hours = MOCK_DURATION_HOURS / transactions_to_generate
-            print(f"DEBUG: This transaction simulates {mock_billing_hours:.5f} profile hours")
-            
-        # Important: We intentionally keep the transaction and profile durations realistic
-        # Relay enforces a 30-second limit - trying to bypass it causes validation failures
-        # Instead, we let more transactions accumulate the desired profile hours over time
-
-        # Add the profile second
         envelope.add_item(
             Item(
                 payload=PayloadRef(json=profile_payload),
                 type="profile",
-                headers={"platform": PLATFORM},
+                headers={"platform": PLATFORM}
             )
         )
-
-        # Send the envelope directly
+        
+        # Send the envelope
         capture_func(envelope)
-
+        
         # Update tracking
         profiles_generated += 1
-
+        total_profile_seconds += tx_duration
+        
         # Report progress periodically
         current_time = time.time()
-        if (
-            current_time - last_report_time
-        ) >= 0.5 or profiles_generated == transactions_to_generate:
+        if (current_time - last_report_time) >= 0.5 or profiles_generated == transactions_to_generate:
             last_report_time = current_time
             elapsed = current_time - start_time
             progress = (profiles_generated / transactions_to_generate) * 100
-
-            # Calculate hours covered based on proportion of profiles generated
-            time_covered = (
-                profiles_generated / transactions_to_generate
-            ) * MOCK_DURATION_HOURS
-
+            
+            # Calculate hours covered
+            time_covered = total_profile_seconds / 3600
+            
             # Estimate completion time
             if profiles_generated > 0 and elapsed > 0:
                 profiles_per_second = profiles_generated / elapsed
                 remaining_profiles = transactions_to_generate - profiles_generated
                 estimated_remaining_seconds = (
-                    remaining_profiles / profiles_per_second
-                    if profiles_per_second > 0
-                    else 0
+                    remaining_profiles / profiles_per_second if profiles_per_second > 0 else 0
                 )
-
+                
                 print(
                     f"Progress: {profiles_generated}/{transactions_to_generate} profiles "
-                    f"({progress:.1f}%, {time_covered:.2f} hours covered), "
+                    f"({progress:.1f}%, {time_covered:.2f} profile hours), "
                     f"Rate: {profiles_per_second:.1f} profiles/s, "
                     f"ETA: {estimated_remaining_seconds:.1f}s"
                 )
-
+    
     # Final report
     total_time = time.time() - start_time
+    total_profile_hours = total_profile_seconds / 3600
+    
     print(
-        f"\nGeneration complete: {profiles_generated} transaction profiles ({MOCK_DURATION_HOURS} hours) "
-        f"generated in {total_time:.2f} seconds"
+        f"\nGeneration complete: {profiles_generated} transaction profiles "
+        f"generating {total_profile_hours:.2f} profile hours "
+        f"in {total_time:.2f} seconds"
     )
     print(
         f"Generation speed: {profiles_generated / total_time:.1f} profiles/second "
-        f"({MOCK_DURATION_HOURS / total_time:.2f} hours/second)"
+        f"({total_profile_hours / total_time:.2f} profile hours/second)"
     )
 
-    # Offer to run more if needed
-    print(
-        f"\nTip: To generate more data, increase MOCK_DURATION_HOURS at the top of the script."
-    )
+def run_standard_profiling():
+    """Run standard continuous profiling with real CPU tasks"""
+    # Start the profiler
+    sentry_sdk.profiler.start_profiler()
+    
+    # Run a series of transactions with errors and CPU-intensive tasks
+    for i in range(3):
+        with sentry_sdk.start_transaction(name=f"test-transaction-{i}") as transaction:
+            # Add test tags
+            is_ui_platform = PLATFORM in UI_PLATFORMS
+            transaction.set_tag("ui_profile_test", is_ui_platform)
+            transaction.set_tag("is_ui_platform", is_ui_platform)
+            transaction.set_tag("profile_type", "continuous")
+            transaction.set_tag("platform_override", PLATFORM)
+            
+            # Run a CPU-intensive task
+            duration_ms = 200 * (i + 1)
+            print(f"Running CPU task {i+1}/3 (duration: {duration_ms}ms)...")
+            cpu_intensive_task(duration_ms)
+    
+    # For continuous profiling, let it run longer to collect more data
+    for i in range(5):
+        cpu_intensive_task(300)
+        print(f"Continuous profiling running... ({i+1}/5)")
+        time.sleep(0.2)
 
 
 def run_iteration():
