@@ -276,7 +276,7 @@ PROFILE_TYPE = "transaction"
 # This script forces the platform to the value specified here, regardless of
 # the actual platform the code runs on (Python).
 # Options: "javascript", "android", "cocoa" (for UI profiles)
-PLATFORM = "python"
+PLATFORM = "javascript"
 
 # === TIMESTAMP MOCKING CONFIGURATION ===
 #
@@ -335,7 +335,7 @@ MOCK_SAMPLES_PER_HOUR = 3600  # How many samples per hour to generate (if mockin
 #
 # For billing tests where you need to generate many profile hours quickly, enable this option.
 # Set to True to generate chunks directly (bypasses profiler)
-DIRECT_CHUNK_GENERATION = True
+DIRECT_CHUNK_GENERATION = False
 
 # SAMPLES_PER_CHUNK controls how many stack samples are included in each profile chunk
 # when using DIRECT_CHUNK_GENERATION mode.
@@ -1559,8 +1559,9 @@ def generate_direct_transaction_profiles():
     )
 
     # Calculate how many transactions/profiles to generate
-    # We'll create approximately 10 transactions per hour
-    transactions_to_generate = max(1, int(MOCK_DURATION_HOURS * 10))
+    # We'll create approximately 100 transactions per hour of profile time
+    # Each transaction will be valid (< 30s) but collectively they'll simulate longer durations
+    transactions_to_generate = max(10, int(MOCK_DURATION_HOURS * 100))
 
     # Explain the timestamp approach being used
     current_time = datetime.now(timezone.utc)
@@ -1662,8 +1663,9 @@ def generate_direct_transaction_profiles():
             stack_id, frame_ids, frame_objects = stack_data
 
             # Calculate offset within the transaction duration (in nanoseconds)
-            # We need to spread samples throughout the profile
-            relative_offset = (i / SAMPLES_PER_CHUNK) * tx_duration_sec * 1_000_000_000
+            # We need to spread samples throughout the profile - CRITICAL: Timestamp must be < 30s
+            # Explicitly cap each transaction to 25 seconds to be safe (Relay has 30s limit)
+            relative_offset = (i / SAMPLES_PER_CHUNK) * min(25.0, tx_duration_sec) * 1_000_000_000
 
             # Create frame references (just like in Profile.write)
             if stack_id not in indexed_stacks:
@@ -1675,13 +1677,13 @@ def generate_direct_transaction_profiles():
                 indexed_stacks[stack_id] = len(indexed_stacks)
                 stacks.append([indexed_frames[frame_id] for frame_id in frame_ids])
 
-            # Transaction profiles require string representation of nanosecond offsets
-            # This is different from continuous profiles which use Unix timestamps
+            # CRITICAL: Transaction profiles require string representation of nanosecond offsets
+            # Format exactly as SDK does - string representation of nanoseconds
             samples.append(
                 {
                     "elapsed_since_start_ns": str(int(relative_offset)),
                     "thread_id": str(tid),
-                    "stack_id": indexed_stacks[stack_id],
+                    "stack_id": indexed_stacks[stack_id]
                 }
             )
 
@@ -1712,19 +1714,22 @@ def generate_direct_transaction_profiles():
         # Generate span ID for the transaction
         span_id = uuid.uuid4().hex[:16]
 
-        # Transaction timestamps need to be ISO format strings
+        # Transaction timestamps MUST be ISO format strings
+        # For transaction events, the DSN expects ISO 8601 formatted timestamps
         transaction_start_time = datetime.fromtimestamp(transaction_timestamp, tz=timezone.utc).isoformat()
         transaction_end_time = datetime.fromtimestamp(transaction_timestamp + transaction_duration, tz=timezone.utc).isoformat()
         
-        # Create the transaction event
+        # We'll generate many more transactions to simulate longer profile hours
+        # Instead of trying to hack a single transaction to cover hours, we generate multiple valid transactions
+        
+        # Create the transaction event - CRITICAL: Must match SDK format exactly
         transaction_event = {
             "event_id": event_id,
             "type": "transaction",
             "transaction": f"synthetic-transaction-{idx}",
-            "platform": PLATFORM,  # Override to target platform
             "start_timestamp": transaction_start_time,
             "timestamp": transaction_end_time,
-            # Add all the expected transaction fields
+            "platform": PLATFORM,
             "contexts": {
                 "trace": {
                     "trace_id": trace_id,
@@ -1732,71 +1737,44 @@ def generate_direct_transaction_profiles():
                     "op": "synthetic",
                     "status": "ok",
                 },
-                # Add profile ID reference
-                "profile": {
-                    "profile_id": profile_id
-                },
+                # Don't add profile context - Relay will add it during processing
             },
-            "tags": {
-                "transaction": f"synthetic-transaction-{idx}",
-                "synthetic": "true",
-                "profile_type": "transaction",
-                "mock_duration_hours": str(MOCK_DURATION_HOURS),
-                "ui_profile_test": PLATFORM in UI_PLATFORMS,
-                "is_ui_platform": PLATFORM in UI_PLATFORMS,
-                "platform_override": PLATFORM,
-                "original_platform": "python",
-                "test_run_id": str(uuid.uuid4())[:8],
-                "direct_generation": "true",
-            },
-            # Add some spans for realism
             "spans": [
                 {
                     "span_id": uuid.uuid4().hex[:16],
                     "parent_span_id": span_id,
                     "start_timestamp": transaction_start_time,
                     "timestamp": transaction_end_time,
-                    "description": "Synthetic child span",
-                    "op": "child-operation",
+                    "description": "Synthetic operation",
+                    "op": "http",
                     "status": "ok",
                 }
             ],
             "measurements": {
-                "synthetic_metric": {
-                    "value": random.randint(10, 100),
+                "fp": {
+                    "value": 123.45,
                     "unit": "millisecond",
                 }
             },
+            # Add only minimal tags that won't confuse Relay
+            "tags": {
+                "transaction": f"synthetic-transaction-{idx}",
+            }
         }
 
         # Now create the profile payload according to SDK format
-        # Must match the structure from the SDK exactly
+        # Must match the structure from the SDK exactly - don't add extra fields
         profile_payload = {
-            "event_id": profile_id,  # Profile has its own unique ID 
-            "platform": PLATFORM,  # Set to match the transaction platform
-            "profile": processed_profile,
-            "version": "1",  # MUST be "1" for transaction profiles
-            "timestamp": transaction_start_time,  # Use same ISO format timestamp as transaction
+            "event_id": profile_id,
+            "version": "1",
+            "platform": PLATFORM,
+            "timestamp": transaction_start_time,
+            # Optional release and environment
             "release": client.options.get("release", ""),
             "environment": client.options.get("environment"),
-            # For transaction profiles, we MUST reference the transaction
-            "transactions": [
-                {
-                    "id": event_id,  # MUST match the transaction event_id exactly
-                    "trace_id": trace_id,  # MUST match the transaction trace context trace_id
-                    "name": f"synthetic-transaction-{idx}", # MUST match transaction.transaction
-                    "active_thread_id": str(threading.get_ident()),
-                    "relative_start_ns": "0",  # Start at 0 nanoseconds
-                    # IMPORTANT: This is the field Relay uses to determine the profile duration
-                    # Must be string format, and for real profiles would be limited to 30 seconds
-                    # For profile hours simulation, we need a special approach:
-                    # 1. Use a value that's within Relay's validation (< 30s) for the real transaction 
-                    # 2. But we want to modify this AFTER we construct the transaction to simulate longer durations
-                    # This hack allows us to bypass Relay validation while still generating profile hours
-                    "relative_end_ns": str(int(transaction_duration * 1_000_000_000))
-                }
-            ],
-            # Device/OS/runtime info - required by validation 
+            # The actual profile data
+            "profile": processed_profile,
+            # Required device information
             "device": {
                 "architecture": platform.machine(),
             },
@@ -1808,16 +1786,18 @@ def generate_direct_transaction_profiles():
                 "name": platform.python_implementation(),
                 "version": platform.python_version(),
             },
-            # Add tags that will help with debugging
-            "tags": {
-                "profile_type": "transaction",
-                "ui_profile_test": str(PLATFORM in UI_PLATFORMS),
-                "is_ui_platform": str(PLATFORM in UI_PLATFORMS),
-                "original_platform": "python",
-                "platform_override": PLATFORM,
-                "mock_duration_hours": str(MOCK_DURATION_HOURS),
-                "transaction_id": event_id
-            }
+            # Critical transaction reference - must match transaction exactly
+            "transactions": [
+                {
+                    "id": event_id,  # MUST match transaction event_id
+                    "trace_id": trace_id,  # MUST match transaction trace_id
+                    "name": f"synthetic-transaction-{idx}",  # MUST match transaction.transaction
+                    "active_thread_id": str(threading.get_ident()),
+                    "relative_start_ns": "0",
+                    "relative_end_ns": str(int(transaction_duration * 1_000_000_000))
+                }
+            ]
+            # NO tags - the SDK doesn't add them and they may confuse validation
         }
 
         # Create an envelope with both the transaction and its profile
@@ -1832,22 +1812,24 @@ def generate_direct_transaction_profiles():
             )
         )
 
-        # Save the original relative_end_ns for the profile's transaction
-        original_profile_duration_ns = profile_payload["transactions"][0]["relative_end_ns"]
+        # Important: Transaction profile max duration is 30 seconds
+        # We need to keep our real duration below this limit while simulating longer durations
+        # Do NOT modify the profile.transactions[0].relative_end_ns yet - let Relay validate it first
         
-        # Modify the profile to simulate a longer duration for billing purposes
-        # This is a critical hack to bypass Relay duration validation while generating more profile hours
-        if MOCK_DURATION_HOURS > 0:
-            # Calculate a mock duration in nanoseconds - this represents a portion of the total mock hours
-            mock_duration_ns = int((MOCK_DURATION_HOURS * 3600 * 1_000_000_000) / transactions_to_generate)
+        # Check and report the original profile duration for debugging
+        original_profile_duration_ns = int(profile_payload["transactions"][0]["relative_end_ns"])
+        if DEBUG_PROFILING:
+            print(f"DEBUG: Original profile duration: {original_profile_duration_ns/1_000_000_000:.2f}s")
             
-            # Use the mock duration only if it's larger than the real one
-            if mock_duration_ns > int(original_profile_duration_ns):
-                profile_payload["transactions"][0]["relative_end_ns"] = str(mock_duration_ns)
-                
-                if DEBUG_PROFILING:
-                    print(f"DEBUG: Extended profile duration from {int(original_profile_duration_ns)/1_000_000_000:.2f}s to {mock_duration_ns/1_000_000_000:.2f}s")
-                    print(f"DEBUG: This contributes {mock_duration_ns/3_600_000_000_000:.5f} hours to profile hours billing")
+        # We'll adjust the billing duration in backend API after Relay validates the profile
+        if MOCK_DURATION_HOURS > 0 and DEBUG_PROFILING:
+            # Calculate the simulated billing duration
+            mock_billing_hours = MOCK_DURATION_HOURS / transactions_to_generate
+            print(f"DEBUG: This transaction simulates {mock_billing_hours:.5f} profile hours")
+            
+        # Important: We intentionally keep the transaction and profile durations realistic
+        # Relay enforces a 30-second limit - trying to bypass it causes validation failures
+        # Instead, we let more transactions accumulate the desired profile hours over time
 
         # Add the profile second
         envelope.add_item(
