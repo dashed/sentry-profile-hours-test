@@ -262,7 +262,8 @@ if PRESET != "DISABLED":
 #    - Sends regular "profile chunks" approximately every 60 seconds
 #
 # NOTE: These profiling modes cannot be used simultaneously in the same SDK initialization.
-PROFILE_TYPE = "continuous"  # Options: "continuous" or "transaction"
+# Options: "continuous" or "transaction"
+PROFILE_TYPE = "transaction"
 
 # PLATFORM determines how Relay and Sentry categorize profiles for billing purposes:
 #
@@ -275,7 +276,7 @@ PROFILE_TYPE = "continuous"  # Options: "continuous" or "transaction"
 # This script forces the platform to the value specified here, regardless of
 # the actual platform the code runs on (Python).
 # Options: "javascript", "android", "cocoa" (for UI profiles)
-PLATFORM = "javascript"
+PLATFORM = "python"
 
 # === TIMESTAMP MOCKING CONFIGURATION ===
 #
@@ -293,9 +294,8 @@ PLATFORM = "javascript"
 #
 # For transaction profiling: This extends the relative_end_ns of transactions
 # For continuous profiling: This spreads samples across multiple 60-second windows
-MOCK_TIMESTAMPS = (
-    False  # Set to True to mock longer profiles in standard profiling mode
-)
+# Set to True to mock longer profiles in standard profiling mode
+MOCK_TIMESTAMPS = False
 
 # MOCK_DURATION_HOURS sets how many hours of profiling data to simulate.
 # This controls:
@@ -334,9 +334,8 @@ MOCK_SAMPLES_PER_HOUR = 3600  # How many samples per hour to generate (if mockin
 # spread across that duration.
 #
 # For billing tests where you need to generate many profile hours quickly, enable this option.
-DIRECT_CHUNK_GENERATION = (
-    True  # Set to True to generate chunks directly (bypasses profiler)
-)
+# Set to True to generate chunks directly (bypasses profiler)
+DIRECT_CHUNK_GENERATION = True
 
 # SAMPLES_PER_CHUNK controls how many stack samples are included in each profile chunk
 # when using DIRECT_CHUNK_GENERATION mode.
