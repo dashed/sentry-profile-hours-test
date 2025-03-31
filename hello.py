@@ -1604,10 +1604,30 @@ def generate_direct_transaction_profiles():
         
     print(f"Captured {len(captured_envelopes)} envelopes with real transaction profiles")
     
-    # Extract the first transaction and profile as templates
-    template_envelope = captured_envelopes[0]
+    # Extract the template transaction and profile
+    template_envelope = None
     template_transaction = None
     template_profile = None
+    
+    # Find the first envelope containing both a transaction and profile
+    for envelope in captured_envelopes:
+        has_transaction = False
+        has_profile = False
+        
+        # Check if this envelope has both transaction and profile
+        for item in envelope:
+            if item.type == "transaction":
+                has_transaction = True
+            elif item.type == "profile":
+                has_profile = True
+                
+        if has_transaction and has_profile:
+            template_envelope = envelope
+            break
+    
+    if not template_envelope:
+        print("ERROR: Couldn't find an envelope with both transaction and profile. Falling back to standard profiling.")
+        return run_transaction_profile_test()
     
     # Extract transaction and profile from template envelope
     for item in template_envelope:
@@ -1621,6 +1641,15 @@ def generate_direct_transaction_profiles():
         return run_transaction_profile_test()
     
     print("Successfully extracted template transaction and profile")
+    print(f"Transaction template keys: {list(template_transaction.keys())}")
+    print(f"Profile template keys: {list(template_profile.keys())}")
+    
+    # Extract critical profile structure information to ensure valid profiles
+    has_profile_frames = "frames" in template_profile.get("profile", {})
+    has_profile_stacks = "stacks" in template_profile.get("profile", {})
+    has_profile_samples = "samples" in template_profile.get("profile", {})
+    
+    print(f"Profile has frames: {has_profile_frames}, stacks: {has_profile_stacks}, samples: {has_profile_samples}")
     
     # Now we can generate profiles using these templates
     # Get the actual transport capture function
@@ -1664,8 +1693,12 @@ def generate_direct_transaction_profiles():
         tx_start_time = datetime.fromtimestamp(tx_timestamp, tz=timezone.utc).isoformat()
         tx_end_time = datetime.fromtimestamp(tx_timestamp + tx_duration, tz=timezone.utc).isoformat()
         
-        # Clone the template transaction with our new values
-        tx_payload = dict(template_transaction)
+        # Use deep copies to avoid modifying the templates
+        import copy
+        tx_payload = copy.deepcopy(template_transaction)
+        profile_payload = copy.deepcopy(template_profile)
+        
+        # Update transaction payload with our new values
         tx_payload.update({
             "event_id": event_id,
             "type": "transaction",
@@ -1673,33 +1706,87 @@ def generate_direct_transaction_profiles():
             "start_timestamp": tx_start_time,
             "timestamp": tx_end_time,
             "platform": PLATFORM,
-            "contexts": {
-                "trace": {
-                    "trace_id": trace_id,
-                    "span_id": span_id,
-                    "op": "synthetic",
-                    "status": "ok"
-                }
-            }
         })
         
-        # Clone the template profile with our new values
-        profile_payload = dict(template_profile)
+        # Update trace context if it exists
+        if "contexts" in tx_payload and "trace" in tx_payload["contexts"]:
+            tx_payload["contexts"]["trace"].update({
+                "trace_id": trace_id,
+                "span_id": span_id,
+                "op": "synthetic",
+                "status": "ok"
+            })
+        else:
+            # Create trace context if it doesn't exist
+            if "contexts" not in tx_payload:
+                tx_payload["contexts"] = {}
+            tx_payload["contexts"]["trace"] = {
+                "trace_id": trace_id,
+                "span_id": span_id,
+                "op": "synthetic",
+                "status": "ok"
+            }
+        
+        # Add tags for identification
+        if "tags" not in tx_payload:
+            tx_payload["tags"] = {}
+        tx_payload["tags"].update({
+            "synthetic": "true",
+            "ui_profile_test": PLATFORM in UI_PLATFORMS,
+            "platform_override": PLATFORM,
+            "mock_duration_hours": str(MOCK_DURATION_HOURS)
+        })
+        
+        # Update profile payload with our new values
         profile_payload.update({
             "event_id": profile_id,
             "platform": PLATFORM,
             "timestamp": tx_start_time,
-            "transactions": [
-                {
+        })
+        
+        # Update transactions list in profile
+        if "transactions" in profile_payload:
+            # If transactions list exists, update it
+            if len(profile_payload["transactions"]) > 0:
+                # Update the first transaction
+                profile_payload["transactions"][0] = {
+                    "id": event_id,
+                    "name": f"synthetic-transaction-{idx}",
+                    "trace_id": trace_id,
+                    "active_thread_id": profile_payload["transactions"][0].get("active_thread_id", str(threading.get_ident())),
+                    "relative_start_ns": "0",
+                    "relative_end_ns": str(int(tx_duration * 1_000_000_000))
+                }
+                
+                # Remove any extra transactions
+                if len(profile_payload["transactions"]) > 1:
+                    profile_payload["transactions"] = [profile_payload["transactions"][0]]
+            else:
+                # Add a transaction if the list is empty
+                profile_payload["transactions"] = [{
                     "id": event_id,
                     "name": f"synthetic-transaction-{idx}",
                     "trace_id": trace_id,
                     "active_thread_id": str(threading.get_ident()),
                     "relative_start_ns": "0",
                     "relative_end_ns": str(int(tx_duration * 1_000_000_000))
-                }
-            ]
-        })
+                }]
+        else:
+            # Create transactions list if it doesn't exist
+            profile_payload["transactions"] = [{
+                "id": event_id,
+                "name": f"synthetic-transaction-{idx}",
+                "trace_id": trace_id,
+                "active_thread_id": str(threading.get_ident()),
+                "relative_start_ns": "0",
+                "relative_end_ns": str(int(tx_duration * 1_000_000_000))
+            }]
+        
+        # CRITICAL FIX: Ensure all sample timestamps are string representations
+        if "profile" in profile_payload and "samples" in profile_payload["profile"]:
+            for sample in profile_payload["profile"]["samples"]:
+                if "elapsed_since_start_ns" in sample and not isinstance(sample["elapsed_since_start_ns"], str):
+                    sample["elapsed_since_start_ns"] = str(sample["elapsed_since_start_ns"])
         
         # Create an envelope using the real SDK's envelope structure
         envelope = Envelope()
