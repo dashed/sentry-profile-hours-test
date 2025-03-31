@@ -1700,17 +1700,22 @@ def generate_direct_transaction_profiles():
             "thread_metadata": thread_metadata,
         }
 
-        # Calculate proper transaction duration in seconds (for timestamps)
-        # Ensure this is within Relay's validation limits (< 30 seconds)
+        # IMPORTANT: Keep transaction duration within 30-second limit for transaction profiles
+        # This is enforced by Relay's MAX_PROFILE_DURATION (30 seconds)
+        # Real duration used for the event (must be < 30 seconds)
         transaction_duration = min(25.0, tx_duration_sec)
-
-        # For transaction timestamp, we need ISO format strings
-        transaction_start_time = datetime.fromtimestamp(transaction_timestamp, tz=timezone.utc).isoformat()
-        transaction_end_time = datetime.fromtimestamp(transaction_timestamp + transaction_duration, tz=timezone.utc).isoformat()
+        
+        # For billing simulation, we need to create mock_duration that's much longer
+        # This will be used in the relative_end_ns field to simulate long profiles
+        mock_profile_duration = MOCK_DURATION_HOURS * 3600 / transactions_to_generate
 
         # Generate span ID for the transaction
         span_id = uuid.uuid4().hex[:16]
 
+        # Transaction timestamps need to be ISO format strings
+        transaction_start_time = datetime.fromtimestamp(transaction_timestamp, tz=timezone.utc).isoformat()
+        transaction_end_time = datetime.fromtimestamp(transaction_timestamp + transaction_duration, tz=timezone.utc).isoformat()
+        
         # Create the transaction event
         transaction_event = {
             "event_id": event_id,
@@ -1727,12 +1732,15 @@ def generate_direct_transaction_profiles():
                     "op": "synthetic",
                     "status": "ok",
                 },
-                # IMPORTANT: We don't add profile context here - Relay adds it during processing
+                # Add profile ID reference
+                "profile": {
+                    "profile_id": profile_id
+                },
             },
             "tags": {
                 "transaction": f"synthetic-transaction-{idx}",
                 "synthetic": "true",
-                "profile_type": "transaction",  # Explicitly mark as transaction profiling
+                "profile_type": "transaction",
                 "mock_duration_hours": str(MOCK_DURATION_HOURS),
                 "ui_profile_test": PLATFORM in UI_PLATFORMS,
                 "is_ui_platform": PLATFORM in UI_PLATFORMS,
@@ -1740,13 +1748,12 @@ def generate_direct_transaction_profiles():
                 "original_platform": "python",
                 "test_run_id": str(uuid.uuid4())[:8],
                 "direct_generation": "true",
-                "mock_timestamps": "past",  # Indicate we're using past timestamps
             },
             # Add some spans for realism
             "spans": [
                 {
                     "span_id": uuid.uuid4().hex[:16],
-                    "parent_span_id": span_id,  # Must reference parent span ID
+                    "parent_span_id": span_id,
                     "start_timestamp": transaction_start_time,
                     "timestamp": transaction_end_time,
                     "description": "Synthetic child span",
@@ -1762,32 +1769,34 @@ def generate_direct_transaction_profiles():
             },
         }
 
-        # Now create the profile payload with proper references to the transaction
+        # Now create the profile payload according to SDK format
+        # Must match the structure from the SDK exactly
         profile_payload = {
-            "event_id": profile_id,  # Profile has its own unique ID
-            "platform": PLATFORM,
+            "event_id": profile_id,  # Profile has its own unique ID 
+            "platform": PLATFORM,  # Set to match the transaction platform
             "profile": processed_profile,
-            "version": "1",
-            # Use ISO timestamp format as string for profile timestamp
-            "timestamp": transaction_start_time,
+            "version": "1",  # MUST be "1" for transaction profiles
+            "timestamp": transaction_start_time,  # Use same ISO format timestamp as transaction
             "release": client.options.get("release", ""),
             "environment": client.options.get("environment"),
-            # For transaction profiles, we need to reference the transaction
+            # For transaction profiles, we MUST reference the transaction
             "transactions": [
                 {
-                    "id": event_id,  # Must match the transaction event_id exactly
-                    "trace_id": trace_id,  # Must match the transaction trace context
-                    "name": f"synthetic-transaction-{idx}",
+                    "id": event_id,  # MUST match the transaction event_id exactly
+                    "trace_id": trace_id,  # MUST match the transaction trace context trace_id
+                    "name": f"synthetic-transaction-{idx}", # MUST match transaction.transaction
                     "active_thread_id": str(threading.get_ident()),
-                    "relative_start_ns": "0",
-                    # This is the critical field for mocking long durations
-                    # IMPORTANT: Must be string format for nanoseconds
-                    "relative_end_ns": str(
-                        int(MOCK_DURATION_HOURS * 3600 * 1_000_000_000 / transactions_to_generate)
-                    ),
+                    "relative_start_ns": "0",  # Start at 0 nanoseconds
+                    # IMPORTANT: This is the field Relay uses to determine the profile duration
+                    # Must be string format, and for real profiles would be limited to 30 seconds
+                    # For profile hours simulation, we need a special approach:
+                    # 1. Use a value that's within Relay's validation (< 30s) for the real transaction 
+                    # 2. But we want to modify this AFTER we construct the transaction to simulate longer durations
+                    # This hack allows us to bypass Relay validation while still generating profile hours
+                    "relative_end_ns": str(int(transaction_duration * 1_000_000_000))
                 }
             ],
-            # Device/OS/runtime info
+            # Device/OS/runtime info - required by validation 
             "device": {
                 "architecture": platform.machine(),
             },
@@ -1799,24 +1808,22 @@ def generate_direct_transaction_profiles():
                 "name": platform.python_implementation(),
                 "version": platform.python_version(),
             },
-            # Add tags for searchability in Sentry UI
+            # Add tags that will help with debugging
             "tags": {
                 "profile_type": "transaction",
-                "ui_profile_test": PLATFORM in UI_PLATFORMS,
-                "is_ui_platform": PLATFORM in UI_PLATFORMS,
-                "synthetic": "true",
-                "direct_generation": "true",
-                "mock_duration_hours": str(MOCK_DURATION_HOURS),
+                "ui_profile_test": str(PLATFORM in UI_PLATFORMS),
+                "is_ui_platform": str(PLATFORM in UI_PLATFORMS),
+                "original_platform": "python",
                 "platform_override": PLATFORM,
-                "transaction_id": event_id,  # Reference to the transaction
-            },
+                "mock_duration_hours": str(MOCK_DURATION_HOURS),
+                "transaction_id": event_id
+            }
         }
 
         # Create an envelope with both the transaction and its profile
         envelope = Envelope()
 
         # CRITICAL: Order matters! Transaction MUST come before profile in the envelope
-        # This is the opposite of what we had before
         envelope.add_item(
             Item(
                 payload=PayloadRef(json=transaction_event),
@@ -1824,6 +1831,23 @@ def generate_direct_transaction_profiles():
                 headers={"platform": PLATFORM},
             )
         )
+
+        # Save the original relative_end_ns for the profile's transaction
+        original_profile_duration_ns = profile_payload["transactions"][0]["relative_end_ns"]
+        
+        # Modify the profile to simulate a longer duration for billing purposes
+        # This is a critical hack to bypass Relay duration validation while generating more profile hours
+        if MOCK_DURATION_HOURS > 0:
+            # Calculate a mock duration in nanoseconds - this represents a portion of the total mock hours
+            mock_duration_ns = int((MOCK_DURATION_HOURS * 3600 * 1_000_000_000) / transactions_to_generate)
+            
+            # Use the mock duration only if it's larger than the real one
+            if mock_duration_ns > int(original_profile_duration_ns):
+                profile_payload["transactions"][0]["relative_end_ns"] = str(mock_duration_ns)
+                
+                if DEBUG_PROFILING:
+                    print(f"DEBUG: Extended profile duration from {int(original_profile_duration_ns)/1_000_000_000:.2f}s to {mock_duration_ns/1_000_000_000:.2f}s")
+                    print(f"DEBUG: This contributes {mock_duration_ns/3_600_000_000_000:.5f} hours to profile hours billing")
 
         # Add the profile second
         envelope.add_item(
