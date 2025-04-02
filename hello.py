@@ -112,6 +112,7 @@ UI_PLATFORMS = ("javascript", "android", "cocoa")
 AVAILABLE_DSNS = {
     # AM2 plans
     "profile-hours-am2-business": "https://b700116ce3eadd661071ad84ed45028b@o4508486249218048.ingest.us.sentry.io/4508486249938944",
+    "profile-hours-am2-team": "https://c9275450b3c73d2e984beee5aab20689@o4508486227722240.ingest.us.sentry.io/4508616529346560",
     # AM3 plans
     "profile-hours-am3-team": "https://c523b2b6fbf35cd224884b8f3538cf13@o4508486283952128.ingest.us.sentry.io/4508486284738560",
     "profile-hours-am3-business": "https://e3be3e9fd4c48a23b3a65ec2e62743d1@o4508486299942912.ingest.de.sentry.io/4508486300729424",
