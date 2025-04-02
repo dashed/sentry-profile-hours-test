@@ -85,7 +85,7 @@ PRESET = "DISABLED"
 #
 # NOTE: These profiling modes cannot be used simultaneously in the same SDK initialization.
 # Options: "continuous" or "transaction"
-PROFILE_TYPE = "transaction"
+PROFILE_TYPE = "continuous"
 
 # PLATFORM determines how Relay and Sentry categorize profiles for billing purposes:
 #
@@ -101,7 +101,7 @@ PROFILE_TYPE = "transaction"
 PLATFORM = "javascript"
 
 # Which DSN to use (from AVAILABLE_DSNS below)
-SELECTED_DSN = "profile-hours-am3-business"
+SELECTED_DSN = "profile-hours-am2-business"
 
 # Define which platforms are considered UI platforms
 # These platforms get categorized as UI profile hours rather than backend profile hours
@@ -110,7 +110,10 @@ UI_PLATFORMS = ("javascript", "android", "cocoa")
 
 # Dictionary of available DSNs - add new ones here
 AVAILABLE_DSNS = {
+    # AM2 plans
     "profile-hours-am2-business": "https://b700116ce3eadd661071ad84ed45028b@o4508486249218048.ingest.us.sentry.io/4508486249938944",
+    # AM3 plans
+    "profile-hours-am3-team": "https://c523b2b6fbf35cd224884b8f3538cf13@o4508486283952128.ingest.us.sentry.io/4508486284738560",
     "profile-hours-am3-business": "https://e3be3e9fd4c48a23b3a65ec2e62743d1@o4508486299942912.ingest.de.sentry.io/4508486300729424",
 }
 
